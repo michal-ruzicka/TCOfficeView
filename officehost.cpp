@@ -20,12 +20,10 @@
  *   ERR <message>\n
  */
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-
 #include <windows.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <propsys.h>          // IInitializeWithFile, IInitializeWithStream
 #include <objbase.h>
 #include <stdio.h>
 #include <string>
@@ -34,26 +32,6 @@
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "user32.lib")
-
-// ---------------------------------------------------------------------------
-// COM interface declarations
-//
-// IInitializeWithFile / IInitializeWithStream live in propsys.h, but we only
-// need their IID and a minimal vtable. Declaring them by hand keeps us off
-// propsys.lib at link time.
-// ---------------------------------------------------------------------------
-
-struct __declspec(uuid("b7d14566-0509-4cce-a71f-0a554233bd9b")) IInitializeWithFile
-    : public IUnknown
-{
-    virtual HRESULT STDMETHODCALLTYPE Initialize(LPCWSTR pszFilePath, DWORD grfMode) = 0;
-};
-
-struct __declspec(uuid("b824b49d-22ac-4132-ac65-c0a17b6a3b9c")) IInitializeWithStream
-    : public IUnknown
-{
-    virtual HRESULT STDMETHODCALLTYPE Initialize(IStream* pstream, DWORD grfMode) = 0;
-};
 
 // Category GUID for Windows Preview Handlers — the subkey
 // HKCR\.<ext>\shellex\{8895b1c6-...} points to the handler's CLSID.

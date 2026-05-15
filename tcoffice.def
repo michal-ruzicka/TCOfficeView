@@ -1,4 +1,3 @@
-LIBRARY tcoffice
 EXPORTS
     ListLoad
     ListLoadW
