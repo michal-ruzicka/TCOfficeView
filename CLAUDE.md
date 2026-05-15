@@ -64,6 +64,7 @@ listplug.h            - Lister plugin API (subset used here)
 TCOfficeViewHost.cpp     - host EXE (COM preview handler host)
 app.manifest          - host EXE manifest (PerMonitorV2 DPI)
 pluginst.inf          - TC auto-installer metadata; canonical version source
+TCOfficeView.ini      - sample / system-wide config (logging toggle, etc.)
 CMakeLists.txt        - builds TCOfficeView.wlx / .wlx64 and TCOfficeViewHost.exe
 build.cmd             - convenience driver: x86 + x64, copies to dist/,
                         and packages dist into TCOfficeView.v<version>.zip

@@ -15,6 +15,7 @@ REM     TCOfficeView.wlx64            (64-bit plugin DLL)
 REM     TCOfficeViewHost.exe          (64-bit host EXE)
 REM     TCOfficeViewHost_x86.exe      (32-bit host EXE)
 REM     pluginst.inf                  (TC auto-installer metadata)
+REM     TCOfficeView.ini              (system-wide sample config)
 REM     *.md                          (all repo-root Markdown docs)
 REM   dist\
 REM     TCOfficeView.v<version>.zip   (distributable bundle)
@@ -63,6 +64,7 @@ copy /Y "%BUILD%\x64\Release\TCOfficeViewHost.exe"      "%STAGE%\TCOfficeViewHos
 copy /Y "%BUILD%\x86\Release\TCOfficeView.wlx"          "%STAGE%\"                              >nul
 copy /Y "%BUILD%\x86\Release\TCOfficeViewHost.exe"      "%STAGE%\TCOfficeViewHost_x86.exe"      >nul
 copy /Y "%ROOT%\pluginst.inf"                           "%STAGE%\"                              >nul
+copy /Y "%ROOT%\TCOfficeView.ini"                       "%STAGE%\"                              >nul
 copy /Y "%ROOT%\*.md"                                   "%STAGE%\"                              >nul
 
 echo.

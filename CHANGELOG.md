@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-15
+
+### Added
+
+- Runtime configuration via `TCOfficeView.ini`. The host looks for a per-user
+  override under `%APPDATA%\GHISLER\TCOfficeView.ini` first and falls back to
+  the system-wide INI shipped next to the host EXE; the first existing file
+  wins (no per-key merging).
+- INI-controlled diagnostic logging. `[Logging] LogPath=...` enables the
+  log; an empty value (the default) disables it. Environment variables
+  inside the path (`%TEMP%`, `%LocalAppData%`, …) are expanded, and any
+  missing parent directories are created on first write.
+
+### Changed
+
+- Diagnostic logging is now **off by default**. The previous build wrote
+  to `%TEMP%\TCOfficeViewHost.log` unconditionally whenever
+  `HOST_LOG_ENABLED` was compiled in. That macro is still present as a
+  compile-time kill-switch, but at run time logging is gated by the INI
+  setting above.
+
 ## [0.1.0] - 2026-05-15
 
 First working release.

@@ -81,6 +81,36 @@ Artifacts are written to `dist\`:
 
 Test it with **F3** on any `.docx` / `.xlsx` / `.pptx` file.
 
+## Configuration
+
+Settings are read from `TCOfficeView.ini`. The host looks for it in two
+locations and uses the **first one that exists** (no per-key merging):
+
+1. `%APPDATA%\GHISLER\TCOfficeView.ini` — per-user override
+2. `<plugin install dir>\TCOfficeView.ini` — system-wide default, shipped
+   with the plugin
+
+The ZIP installs the system-wide file with all options commented out, which
+keeps the defaults in effect. To customise, copy that file to
+`%APPDATA%\GHISLER\TCOfficeView.ini` and edit the copy.
+
+All values support Windows environment variables — `%TEMP%`,
+`%LocalAppData%`, `%UserProfile%`, `%APPDATA%` and so on are expanded when
+the value is read.
+
+### Enabling diagnostic logging
+
+Logging is **off by default** so that nothing silently grows on disk. To
+turn it on, set `LogPath` under `[Logging]` to a writable file path. Any
+missing parent directories will be created on the first write.
+
+```ini
+[Logging]
+LogPath=%LocalAppData%\TCOfficeView\host.log
+```
+
+Leave the value empty (or comment it out) to disable logging again.
+
 ## Supported formats
 
 Depends on which Preview Handlers are installed on the system. With Office

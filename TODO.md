@@ -2,8 +2,8 @@
 - [ ] Add info page if MS Office is not available on the target system.
 - [x] Add some open source permissive license.
 - [x] Create standard Total Commander ZIP distribution archive.
-- [ ] Add configuration via ini file.
-  - [ ] System wide ini file in Total Commander installation directory.
-    - [ ] User specific ini file in %USERPROFILE% TC config directory that has precendence over the gloval config.
-  - [ ] Make here logging optional (to not overfill our expensive disks) with configuration of log path.
+- [x] Add configuration via ini file.
+  - [x] System wide ini file in Total Commander installation directory.
+    - [x] User specific ini file in `%AppData%\GHISLER` TC config directory that has precedence over the global config.
+  - [x] Make here logging optional (to not overfill our expensive disks) with configuration of log path.
   - [ ] Add configuration of quick preview or full mode (for Word not showing only web mode view).

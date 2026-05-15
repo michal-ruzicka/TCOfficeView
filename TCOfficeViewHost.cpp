@@ -41,6 +41,7 @@
 #include <windows.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <shlobj.h>           // SHCreateDirectoryExW
 #include <propsys.h>          // IInitializeWithFile, IInitializeWithStream
 #include <objbase.h>
 #include <stdio.h>
@@ -48,15 +49,85 @@
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "user32.lib")
 
 // ---------------------------------------------------------------------------
+// Runtime configuration (loaded from TCOfficeView.ini)
+//
+// Lookup order (first existing file wins; no per-key merging):
+//   1. %APPDATA%\GHISLER\TCOfficeView.ini       — per-user override
+//   2. <plugin install dir>\TCOfficeView.ini    — system-wide default
+//
+// All values support environment-variable expansion (e.g. %TEMP%,
+// %LocalAppData%). See the shipped sample INI for the full key reference.
+// ---------------------------------------------------------------------------
+
+static std::wstring g_logPath;   // empty → diagnostic logging is disabled
+
+static std::wstring ExpandEnv(LPCWSTR s)
+{
+    if (!s || !*s) return L"";
+    DWORD n = ExpandEnvironmentStringsW(s, nullptr, 0);
+    if (n == 0) return s;
+    std::wstring out(n, L'\0');
+    DWORD written = ExpandEnvironmentStringsW(s, out.data(), n);
+    if (written == 0) return s;
+    out.resize(written ? written - 1 : 0);   // drop the trailing null
+    return out;
+}
+
+static std::wstring GetHostExeDir()
+{
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring s(path);
+    auto pos = s.find_last_of(L"\\/");
+    return (pos != std::wstring::npos) ? s.substr(0, pos) : L".";
+}
+
+static bool LoadConfigFrom(const std::wstring& iniPath)
+{
+    if (GetFileAttributesW(iniPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return false;
+    wchar_t buf[2048] = {};
+    GetPrivateProfileStringW(L"Logging", L"LogPath", L"",
+                             buf, ARRAYSIZE(buf), iniPath.c_str());
+    g_logPath = ExpandEnv(buf);
+    return true;
+}
+
+static void LoadConfig()
+{
+    // 1) Per-user override under TC's standard config directory.
+    wchar_t appdata[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH))
+    {
+        std::wstring userIni =
+            std::wstring(appdata) + L"\\GHISLER\\TCOfficeView.ini";
+        if (LoadConfigFrom(userIni)) return;
+    }
+    // 2) System-wide INI shipped alongside the host EXE.
+    LoadConfigFrom(GetHostExeDir() + L"\\TCOfficeView.ini");
+}
+
+static void EnsureParentDir(const std::wstring& filePath)
+{
+    auto sep = filePath.find_last_of(L"\\/");
+    if (sep == std::wstring::npos) return;
+    std::wstring dir = filePath.substr(0, sep);
+    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostic logging
 //
-// Writes to %TEMP%\TCOfficeViewHost.log. Cheap and synchronous so we can trace
-// the exact step that fails when a preview doesn't render. Set
-// HOST_LOG_ENABLED to 0 to silence.
+// At compile time, HOST_LOG_ENABLED = 0 strips the logging code entirely.
+// At run time, logging is gated by g_logPath (loaded from TCOfficeView.ini):
+// an empty path means "do nothing", a non-empty path means "append every
+// HostLog call to that file, creating missing parent directories on first
+// write." See the LoadConfig section above for the INI lookup order.
 // ---------------------------------------------------------------------------
 
 #define HOST_LOG_ENABLED 1
@@ -69,12 +140,15 @@ static void HostLog(const wchar_t* fmt, ...)
     static bool csInit = false;
     if (!csInit) { InitializeCriticalSection(&cs); csInit = true; }
     EnterCriticalSection(&cs);
+    if (g_logPath.empty())
+    {
+        LeaveCriticalSection(&cs);
+        return;
+    }
     if (!hLog)
     {
-        wchar_t path[MAX_PATH] = {};
-        GetTempPathW(MAX_PATH, path);
-        wcscat_s(path, L"TCOfficeViewHost.log");
-        hLog = CreateFileW(path, FILE_APPEND_DATA,
+        EnsureParentDir(g_logPath);
+        hLog = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA,
                            FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
@@ -642,6 +716,9 @@ static HWND CreateStaWindow(HINSTANCE hInst)
 
 int wmain(int argc, wchar_t** argv)
 {
+    // Must run before the first HostLog() call so g_logPath is populated.
+    LoadConfig();
+
     std::wstring pipeName;
     if (!ParseArgs(argc, argv, &g_state.hwndPluginChild, &pipeName))
     {
