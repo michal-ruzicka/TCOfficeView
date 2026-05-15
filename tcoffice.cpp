@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Michal Růžička <ruzicka.mich@gmail.com>
+
 /*
  * tcoffice.cpp - Total Commander Lister plugin for MS Office documents.
  *

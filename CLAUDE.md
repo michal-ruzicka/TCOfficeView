@@ -63,8 +63,10 @@ tcoffice.def          - DLL exports
 listplug.h            - Lister plugin API (subset used here)
 tcoffice_host.cpp     - host EXE (COM preview handler host)
 app.manifest          - host EXE manifest (PerMonitorV2 DPI)
+pluginst.inf          - TC auto-installer metadata; canonical version source
 CMakeLists.txt        - builds tcoffice.wlx / .wlx64 and tcoffice_host.exe
-build.cmd             - convenience driver: x86 + x64 + copies to dist/
+build.cmd             - convenience driver: x86 + x64, copies to dist/,
+                        and packages dist into tcoffice.v<version>.zip
 README.md             - end-user / contributor docs
 CLAUDE.md             - this file
 ```

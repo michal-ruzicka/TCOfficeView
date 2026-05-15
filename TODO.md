@@ -1,7 +1,7 @@
 - [ ] Describe system requirements in README.md.
 - [ ] Add info page if MS Office is not available on the target system.
-- [ ] Add some open source permissive license.
-- [ ] Create standard Total Commander distribution file.
+- [x] Add some open source permissive license.
+- [x] Create standard Total Commander ZIP distribution archive.
 - [ ] Add configuration via ini file.
   - [ ] System wide ini file in Total Commander installation directory.
     - [ ] User specific ini file in %USERPROFILE% TC config directory that has precendence over the gloval config.

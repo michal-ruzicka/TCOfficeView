@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Michal Růžička <ruzicka.mich@gmail.com>
+
 /*
  * Total Commander Lister Plugin API.
  * Minimal subset — see the official TC writers' guide for the full spec:

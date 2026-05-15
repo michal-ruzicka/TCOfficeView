@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Michal Růžička <ruzicka.mich@gmail.com>
+
 /*
  * tcoffice_host.cpp - Total Commander Office preview host process.
  *

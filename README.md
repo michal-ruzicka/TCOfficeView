@@ -153,3 +153,10 @@ HKCR\.docx\shellex\{8895b1c6-b41f-4c1c-a562-0d564250836f}
 check Event Viewer for crashes of `tcoffice_host.exe`. The most common cause
 is a 64/32-bit mismatch — for example a 64-bit Office where only the
 32-bit Preview Handler is registered. Try the other bitness of the plugin.
+
+## License
+
+This project is licensed under the Apache License 2.0 — see
+[LICENSE.md](LICENSE.md) for the full text. The source files carry SPDX
+identifiers (`SPDX-License-Identifier: Apache-2.0`); release notes are in
+[CHANGELOG.md](CHANGELOG.md).
