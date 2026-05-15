@@ -1,0 +1,9 @@
+LIBRARY tcoffice
+EXPORTS
+    ListLoad
+    ListLoadW
+    ListLoadNext
+    ListLoadNextW
+    ListCloseWindow
+    ListGetDetectString
+    ListSendCommand
