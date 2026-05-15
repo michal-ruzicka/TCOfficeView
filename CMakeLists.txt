@@ -35,18 +35,18 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# Host process: officehost.exe (one per bitness, must match installed Office)
+# Host process: tcoffice_host.exe (one per bitness, must match installed Office)
 # ---------------------------------------------------------------------------
 
-add_executable(officehost
-    officehost.cpp
+add_executable(tcoffice_host
+    tcoffice_host.cpp
     app.manifest
 )
 
 # Build as a Windows GUI subsystem app — no console window flashes when the
 # plugin spawns it. wmain is wired up via the entry point property.
-set_target_properties(officehost PROPERTIES
+set_target_properties(tcoffice_host PROPERTIES
     WIN32_EXECUTABLE TRUE
     LINK_FLAGS "/ENTRY:wmainCRTStartup"
-    OUTPUT_NAME "officehost"
+    OUTPUT_NAME "tcoffice_host"
 )

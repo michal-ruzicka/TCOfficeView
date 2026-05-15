@@ -1,13 +1,28 @@
 /*
- * officehost.cpp - Total Commander Office preview host process.
+ * tcoffice_host.cpp - Total Commander Office preview host process.
  *
- * Spawned by tcoffice.wlx. Hosts a Windows Preview Handler COM object in a
- * child HWND owned by Total Commander and receives commands from the plugin
- * DLL over a named pipe.
+ * Spawned by tcoffice.wlx. Hosts a Windows Preview Handler COM object and
+ * renders it inside Total Commander's Lister pane.
+ *
+ * Window topology:
+ *
+ *      Total Commander process              this host process
+ *      ---------------------                ------------------
+ *      Lister parent
+ *        └── plugin child   (tcoffice DLL)
+ *              └── (SetParent) ─────────── render window  (this process)
+ *                                              └── preview handler's
+ *                                                  internal windows
+ *
+ *   The DLL creates a child window inside TC's Lister pane and passes its
+ *   HWND on our command line. We then create our *own* child window in *this*
+ *   process and SetParent it into the DLL's window. The preview handler is
+ *   given our render window — never TC's — so its internal SetParent calls
+ *   stay within our process and don't deadlock against TC's UI thread.
  *
  * Threading model:
- *   - Main thread is the STA. Runs a Win32 message loop and a hidden
- *     message-only window. All COM calls happen on this thread.
+ *   - Main thread is the STA. Runs a Win32 message loop. All COM calls and
+ *     window-tree manipulation happen here.
  *   - Pipe reader runs on a worker thread, dispatches each command to the
  *     STA window via SendMessage, and writes the response back.
  *
@@ -33,6 +48,66 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "user32.lib")
 
+// ---------------------------------------------------------------------------
+// Diagnostic logging
+//
+// Writes to %TEMP%\tcoffice_host.log. Cheap and synchronous so we can trace
+// the exact step that fails when a preview doesn't render. Set
+// HOST_LOG_ENABLED to 0 to silence.
+// ---------------------------------------------------------------------------
+
+#define HOST_LOG_ENABLED 1
+
+#if HOST_LOG_ENABLED
+static void HostLog(const wchar_t* fmt, ...)
+{
+    static HANDLE hLog = nullptr;
+    static CRITICAL_SECTION cs;
+    static bool csInit = false;
+    if (!csInit) { InitializeCriticalSection(&cs); csInit = true; }
+    EnterCriticalSection(&cs);
+    if (!hLog)
+    {
+        wchar_t path[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, path);
+        wcscat_s(path, L"tcoffice_host.log");
+        hLog = CreateFileW(path, FILE_APPEND_DATA,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+    if (hLog && hLog != INVALID_HANDLE_VALUE)
+    {
+        wchar_t prefix[64] = {};
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        _snwprintf_s(prefix, _TRUNCATE,
+                     L"[%02d:%02d:%02d.%03d pid=%lu] ",
+                     st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                     GetCurrentProcessId());
+
+        wchar_t body[1024] = {};
+        va_list ap;
+        va_start(ap, fmt);
+        _vsnwprintf_s(body, _TRUNCATE, fmt, ap);
+        va_end(ap);
+
+        DWORD written = 0;
+        WriteFile(hLog, prefix,
+                  static_cast<DWORD>(wcslen(prefix) * sizeof(wchar_t)),
+                  &written, nullptr);
+        WriteFile(hLog, body,
+                  static_cast<DWORD>(wcslen(body) * sizeof(wchar_t)),
+                  &written, nullptr);
+        static const wchar_t nl[] = L"\r\n";
+        WriteFile(hLog, nl, sizeof(nl) - sizeof(wchar_t), &written, nullptr);
+        FlushFileBuffers(hLog);
+    }
+    LeaveCriticalSection(&cs);
+}
+#else
+static void HostLog(const wchar_t*, ...) {}
+#endif
+
 // Category GUID for Windows Preview Handlers — the subkey
 // HKCR\.<ext>\shellex\{8895b1c6-...} points to the handler's CLSID.
 static const GUID kPreviewHandlerCategory =
@@ -44,11 +119,12 @@ static const GUID kPreviewHandlerCategory =
 
 struct HostState
 {
-    HWND                hwndParent  = nullptr;            // child window provided by the plugin
-    HWND                hwndSta     = nullptr;            // message-only window for cross-thread dispatch
-    HANDLE              hPipe       = INVALID_HANDLE_VALUE;
-    IUnknown*           pHandlerUnk = nullptr;            // raw COM object
-    IPreviewHandler*    pHandler    = nullptr;            // queried IPreviewHandler view
+    HWND                hwndPluginChild = nullptr;        // window inside TC, supplied on cmd line
+    HWND                hwndRender      = nullptr;        // our own child, reparented into hwndPluginChild
+    HWND                hwndSta         = nullptr;        // message-only window for cross-thread dispatch
+    HANDLE              hPipe           = INVALID_HANDLE_VALUE;
+    IUnknown*           pHandlerUnk     = nullptr;        // raw COM object
+    IPreviewHandler*    pHandler        = nullptr;        // queried IPreviewHandler view
 };
 
 static HostState g_state;
@@ -95,20 +171,120 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
     std::wstring ext = dot;                              // e.g. ".docx"
     std::wstring catGuid = GuidToBraces(kPreviewHandlerCategory);
 
-    // 1) HKCR\.<ext>\shellex\{cat}
     std::wstring sub = ext + L"\\shellex\\" + catGuid;
     std::wstring clsidStr;
-    if (!ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
+    bool foundDirect = ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr);
+    HostLog(L"FindPreviewHandlerClsid: ext='%s' direct=%s value='%s'",
+            ext.c_str(),
+            foundDirect ? L"yes" : L"no",
+            clsidStr.c_str());
+
+    if (!foundDirect)
     {
-        // 2) Resolve ProgID then try HKCR\<ProgID>\shellex\{cat}
         std::wstring progId;
         if (!ReadDefaultString(HKEY_CLASSES_ROOT, ext.c_str(), progId) || progId.empty())
+        {
+            HostLog(L"FindPreviewHandlerClsid: no ProgID for '%s'", ext.c_str());
             return REGDB_E_CLASSNOTREG;
+        }
         sub = progId + L"\\shellex\\" + catGuid;
         if (!ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
+        {
+            HostLog(L"FindPreviewHandlerClsid: progId='%s' has no preview handler",
+                    progId.c_str());
             return REGDB_E_CLASSNOTREG;
+        }
+        HostLog(L"FindPreviewHandlerClsid: progId='%s' value='%s'",
+                progId.c_str(), clsidStr.c_str());
     }
     return CLSIDFromString(clsidStr.c_str(), out);
+}
+
+// ---------------------------------------------------------------------------
+// Render window (in this process) reparented into the plugin's HWND.
+// ---------------------------------------------------------------------------
+
+static const wchar_t* kRenderClassName = L"TCOfficeHostRender";
+
+static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_ERASEBKGND) return 1;        // preview handler paints
+    return DefWindowProcW(hWnd, msg, wp, lp);
+}
+
+static void EnsureRenderClass(HINSTANCE hInst)
+{
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc   = RenderWndProc;
+    wc.hInstance     = hInst;
+    wc.lpszClassName = kRenderClassName;
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.style         = CS_HREDRAW | CS_VREDRAW;
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+// Create our local render window and reparent it into the plugin's child
+// window (which lives inside Total Commander's process). Cross-process
+// SetParent is supported and is the standard pattern for hosting shell
+// extensions in foreign containers.
+static bool CreateRenderWindowSta(HINSTANCE hInst)
+{
+    EnsureRenderClass(hInst);
+
+    RECT rc = {};
+    GetClientRect(g_state.hwndPluginChild, &rc);
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+    HostLog(L"CreateRenderWindowSta: plugin child rect = %dx%d", w, h);
+
+    // Create as message-only first so the window is born already detached
+    // from a real visual tree, then reparent into the plugin's container.
+    HWND hRender = CreateWindowExW(
+        0, kRenderClassName, L"",
+        WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        0, 0, w, h,
+        HWND_MESSAGE, nullptr, hInst, nullptr);
+    if (!hRender)
+    {
+        HostLog(L"  CreateWindowEx failed err=%lu", GetLastError());
+        return false;
+    }
+    HostLog(L"  render hwnd = 0x%p", hRender);
+
+    if (!SetParent(hRender, g_state.hwndPluginChild))
+    {
+        HostLog(L"  SetParent failed err=%lu", GetLastError());
+        DestroyWindow(hRender);
+        return false;
+    }
+    HostLog(L"  SetParent into 0x%p OK", g_state.hwndPluginChild);
+
+    // SetParent does not modify styles automatically, but it does drop the
+    // WS_POPUP bit and add WS_CHILD if needed. Make sure visibility and
+    // clipping are right, then show.
+    SetWindowLongPtrW(hRender, GWL_STYLE,
+                      WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VISIBLE);
+    SetWindowPos(hRender, nullptr, 0, 0, w, h,
+                 SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+
+    g_state.hwndRender = hRender;
+    return true;
+}
+
+static void DestroyRenderWindowSta()
+{
+    if (g_state.hwndRender)
+    {
+        // Reparent back to HWND_MESSAGE before destroying — this severs the
+        // cross-process link cleanly so TC's UI thread doesn't see a stale
+        // child reference while we're tearing down.
+        SetParent(g_state.hwndRender, HWND_MESSAGE);
+        DestroyWindow(g_state.hwndRender);
+        g_state.hwndRender = nullptr;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,46 +309,64 @@ static void UnloadHandlerSta()
 static HRESULT LoadHandlerSta(LPCWSTR path)
 {
     UnloadHandlerSta();
+    HostLog(L"LoadHandlerSta: path='%s' render=0x%p", path, g_state.hwndRender);
 
     CLSID clsid;
     HRESULT hr = FindPreviewHandlerClsid(path, &clsid);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+    {
+        HostLog(L"  FindPreviewHandlerClsid -> 0x%08lX", static_cast<long>(hr));
+        return hr;
+    }
+    {
+        wchar_t clsidStr[64] = {};
+        StringFromGUID2(clsid, clsidStr, ARRAYSIZE(clsidStr));
+        HostLog(L"  CLSID = %s", clsidStr);
+    }
 
     IUnknown* pUnk = nullptr;
     hr = CoCreateInstance(clsid, nullptr,
                           CLSCTX_LOCAL_SERVER | CLSCTX_INPROC_SERVER,
                           IID_IUnknown, reinterpret_cast<void**>(&pUnk));
+    HostLog(L"  CoCreateInstance -> 0x%08lX", static_cast<long>(hr));
     if (FAILED(hr)) return hr;
 
     bool initialized = false;
 
-    // Prefer IInitializeWithFile (Office handlers support it directly).
     {
         IInitializeWithFile* pInit = nullptr;
-        if (SUCCEEDED(pUnk->QueryInterface(__uuidof(IInitializeWithFile),
-                                           reinterpret_cast<void**>(&pInit))))
+        HRESULT qhr = pUnk->QueryInterface(__uuidof(IInitializeWithFile),
+                                           reinterpret_cast<void**>(&pInit));
+        HostLog(L"  QI IInitializeWithFile -> 0x%08lX", static_cast<long>(qhr));
+        if (SUCCEEDED(qhr))
         {
             HRESULT ihr = pInit->Initialize(path, STGM_READ);
+            HostLog(L"  IInitializeWithFile::Initialize -> 0x%08lX",
+                    static_cast<long>(ihr));
             pInit->Release();
             initialized = SUCCEEDED(ihr);
             if (!initialized) hr = ihr;
         }
     }
 
-    // Fallback: IInitializeWithStream via SHCreateStreamOnFileEx.
     if (!initialized)
     {
         IInitializeWithStream* pInit = nullptr;
-        if (SUCCEEDED(pUnk->QueryInterface(__uuidof(IInitializeWithStream),
-                                           reinterpret_cast<void**>(&pInit))))
+        HRESULT qhr = pUnk->QueryInterface(__uuidof(IInitializeWithStream),
+                                           reinterpret_cast<void**>(&pInit));
+        HostLog(L"  QI IInitializeWithStream -> 0x%08lX", static_cast<long>(qhr));
+        if (SUCCEEDED(qhr))
         {
             IStream* pStream = nullptr;
             HRESULT shr = SHCreateStreamOnFileEx(
                 path, STGM_READ | STGM_SHARE_DENY_NONE,
                 0, FALSE, nullptr, &pStream);
+            HostLog(L"  SHCreateStreamOnFileEx -> 0x%08lX", static_cast<long>(shr));
             if (SUCCEEDED(shr))
             {
                 HRESULT ihr = pInit->Initialize(pStream, STGM_READ);
+                HostLog(L"  IInitializeWithStream::Initialize -> 0x%08lX",
+                        static_cast<long>(ihr));
                 pStream->Release();
                 initialized = SUCCEEDED(ihr);
                 if (!initialized) hr = ihr;
@@ -187,12 +381,14 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 
     if (!initialized)
     {
+        HostLog(L"  no Initialize* interface succeeded — bailing");
         pUnk->Release();
         return FAILED(hr) ? hr : E_NOINTERFACE;
     }
 
     IPreviewHandler* pPH = nullptr;
     hr = pUnk->QueryInterface(IID_IPreviewHandler, reinterpret_cast<void**>(&pPH));
+    HostLog(L"  QI IPreviewHandler -> 0x%08lX", static_cast<long>(hr));
     if (FAILED(hr))
     {
         pUnk->Release();
@@ -200,10 +396,17 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     }
 
     RECT rc = {};
-    GetClientRect(g_state.hwndParent, &rc);
-    hr = pPH->SetWindow(g_state.hwndParent, &rc);
+    GetClientRect(g_state.hwndRender, &rc);
+    HostLog(L"  render client rect = (%ld,%ld)-(%ld,%ld)",
+            rc.left, rc.top, rc.right, rc.bottom);
+
+    hr = pPH->SetWindow(g_state.hwndRender, &rc);
+    HostLog(L"  IPreviewHandler::SetWindow -> 0x%08lX", static_cast<long>(hr));
     if (SUCCEEDED(hr))
+    {
         hr = pPH->DoPreview();
+        HostLog(L"  IPreviewHandler::DoPreview -> 0x%08lX", static_cast<long>(hr));
+    }
 
     if (FAILED(hr))
     {
@@ -214,14 +417,22 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 
     g_state.pHandlerUnk = pUnk;
     g_state.pHandler    = pPH;
+    HostLog(L"  LoadHandlerSta SUCCESS");
     return S_OK;
 }
 
 static void ResizeHandlerSta(int w, int h)
 {
-    if (!g_state.pHandler) return;
-    RECT rc = { 0, 0, w, h };
-    g_state.pHandler->SetRect(&rc);
+    if (g_state.hwndRender)
+    {
+        SetWindowPos(g_state.hwndRender, nullptr, 0, 0, w, h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (g_state.pHandler)
+    {
+        RECT rc = { 0, 0, w, h };
+        g_state.pHandler->SetRect(&rc);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +458,9 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         case WM_HOST_CLOSE:
         {
+            HostLog(L"WM_HOST_CLOSE");
             UnloadHandlerSta();
+            DestroyRenderWindowSta();
             PostQuitMessage(0);
             return 0;
         }
@@ -394,8 +607,8 @@ static HWND CreateStaWindow(HINSTANCE hInst)
 {
     static const wchar_t* kClass = L"TCOfficeHostSta";
     WNDCLASSW wc = {};
-    wc.lpfnWndProc = StaWndProc;
-    wc.hInstance = hInst;
+    wc.lpfnWndProc   = StaWndProc;
+    wc.hInstance     = hInst;
     wc.lpszClassName = kClass;
     RegisterClassW(&wc);
     return CreateWindowExW(0, kClass, L"", 0, 0, 0, 0, 0,
@@ -405,19 +618,19 @@ static HWND CreateStaWindow(HINSTANCE hInst)
 int wmain(int argc, wchar_t** argv)
 {
     std::wstring pipeName;
-    if (!ParseArgs(argc, argv, &g_state.hwndParent, &pipeName))
+    if (!ParseArgs(argc, argv, &g_state.hwndPluginChild, &pipeName))
     {
-        OutputDebugStringW(L"officehost: usage --hwnd <handle> --pipe <name>\n");
+        HostLog(L"wmain: bad args (need --hwnd <h> --pipe <name>)");
         return 1;
     }
+    HostLog(L"wmain: plugin-child=0x%p pipe='%s'",
+            g_state.hwndPluginChild, pipeName.c_str());
 
     HRESULT hr = CoInitializeEx(nullptr,
                                 COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    HostLog(L"  CoInitializeEx -> 0x%08lX", static_cast<long>(hr));
     if (FAILED(hr))
-    {
-        OutputDebugStringW(L"officehost: CoInitializeEx failed\n");
         return 2;
-    }
 
     // Pipe was created by the plugin with FILE_FLAG_OVERLAPPED. Open the
     // client end with the matching flag.
@@ -425,30 +638,44 @@ int wmain(int argc, wchar_t** argv)
                                 GENERIC_READ | GENERIC_WRITE,
                                 0, nullptr, OPEN_EXISTING,
                                 FILE_FLAG_OVERLAPPED, nullptr);
+    HostLog(L"  CreateFile on pipe -> %s (err=%lu)",
+            g_state.hPipe == INVALID_HANDLE_VALUE ? L"FAIL" : L"OK",
+            GetLastError());
     if (g_state.hPipe == INVALID_HANDLE_VALUE)
     {
-        OutputDebugStringW(L"officehost: CreateFile on pipe failed\n");
         CoUninitialize();
         return 3;
     }
     DWORD mode = PIPE_READMODE_MESSAGE;
     SetNamedPipeHandleState(g_state.hPipe, &mode, nullptr, nullptr);
 
-    g_state.hwndSta = CreateStaWindow(GetModuleHandleW(nullptr));
-    if (!g_state.hwndSta)
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+
+    if (!CreateRenderWindowSta(hInst))
     {
+        HostLog(L"  CreateRenderWindowSta failed — bailing");
         CloseHandle(g_state.hPipe);
         CoUninitialize();
         return 4;
+    }
+
+    g_state.hwndSta = CreateStaWindow(hInst);
+    if (!g_state.hwndSta)
+    {
+        DestroyRenderWindowSta();
+        CloseHandle(g_state.hPipe);
+        CoUninitialize();
+        return 5;
     }
 
     HANDLE hThread = CreateThread(nullptr, 0, PipeReaderThread, nullptr, 0, nullptr);
     if (!hThread)
     {
         DestroyWindow(g_state.hwndSta);
+        DestroyRenderWindowSta();
         CloseHandle(g_state.hPipe);
         CoUninitialize();
-        return 5;
+        return 6;
     }
 
     MSG msg;
@@ -459,7 +686,6 @@ int wmain(int argc, wchar_t** argv)
     }
 
     // Make sure the reader exits before we close the pipe handle it shares.
-    // CloseHandle unblocks any pending PipeReadSync with ERROR_OPERATION_ABORTED.
     HANDLE hPipe = g_state.hPipe;
     g_state.hPipe = INVALID_HANDLE_VALUE;
     CancelIoEx(hPipe, nullptr);
@@ -468,6 +694,9 @@ int wmain(int argc, wchar_t** argv)
     CloseHandle(hPipe);
 
     DestroyWindow(g_state.hwndSta);
+    g_state.hwndSta = nullptr;
+
     CoUninitialize();
+    HostLog(L"wmain: exit");
     return 0;
 }

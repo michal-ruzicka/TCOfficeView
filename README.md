@@ -21,7 +21,7 @@ registered by Office itself.
                   │  named pipe (UTF-16, message mode)
                   ▼
 ┌──────────────────────────────────────────────────────┐
-│  officehost.exe  (isolated STA process)              │
+│  tcoffice_host.exe  (isolated STA process)              │
 │                                                      │
 │  • CoCreateInstance(Word/Excel/PowerPoint           │
 │                     Preview Handler CLSID)           │
@@ -69,8 +69,8 @@ Artifacts are written to `dist\`:
 
 - `tcoffice.wlx`        — plugin DLL for 32-bit Total Commander
 - `tcoffice.wlx64`      — plugin DLL for 64-bit Total Commander
-- `officehost.exe`      — host process used by the 64-bit plugin
-- `officehost_x86.exe`  — host process used by the 32-bit plugin
+- `tcoffice_host.exe`      — host process used by the 64-bit plugin
+- `tcoffice_host_x86.exe`  — host process used by the 32-bit plugin
 
 ## Installation
 
@@ -150,6 +150,6 @@ HKCR\.docx\shellex\{8895b1c6-b41f-4c1c-a562-0d564250836f}
 ```
 
 **TC crashes.** Should not happen thanks to process isolation. If it does,
-check Event Viewer for crashes of `officehost.exe`. The most common cause
+check Event Viewer for crashes of `tcoffice_host.exe`. The most common cause
 is a 64/32-bit mismatch — for example a 64-bit Office where only the
 32-bit Preview Handler is registered. Try the other bitness of the plugin.

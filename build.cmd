@@ -3,10 +3,10 @@ REM ===========================================================================
 REM Build script for the TC Office Lister plugin.
 REM
 REM Builds both bitnesses with CMake and copies the artifacts into dist\:
-REM   - tcoffice.wlx        (32-bit plugin DLL)
-REM   - tcoffice.wlx64      (64-bit plugin DLL)
-REM   - officehost.exe      (64-bit host EXE)
-REM   - officehost_x86.exe  (32-bit host EXE)
+REM   - tcoffice.wlx             (32-bit plugin DLL)
+REM   - tcoffice.wlx64           (64-bit plugin DLL)
+REM   - tcoffice_host.exe        (64-bit host EXE)
+REM   - tcoffice_host_x86.exe    (32-bit host EXE)
 REM
 REM Prerequisites:
 REM   - Visual Studio 2022 Build Tools, workload "Desktop development with C++"
@@ -31,8 +31,8 @@ cmake -S "%ROOT%" -B "%BUILD%\x64" -A x64
 if errorlevel 1 goto :error
 cmake --build "%BUILD%\x64" --config Release
 if errorlevel 1 goto :error
-copy /Y "%BUILD%\x64\Release\tcoffice.wlx64"   "%OUT%\"                     >nul
-copy /Y "%BUILD%\x64\Release\officehost.exe"   "%OUT%\officehost.exe"       >nul
+copy /Y "%BUILD%\x64\Release\tcoffice.wlx64"     "%OUT%\"                          >nul
+copy /Y "%BUILD%\x64\Release\tcoffice_host.exe"  "%OUT%\tcoffice_host.exe"         >nul
 
 echo.
 echo === Configure + build (x86) ===
@@ -40,8 +40,8 @@ cmake -S "%ROOT%" -B "%BUILD%\x86" -A Win32
 if errorlevel 1 goto :error
 cmake --build "%BUILD%\x86" --config Release
 if errorlevel 1 goto :error
-copy /Y "%BUILD%\x86\Release\tcoffice.wlx"     "%OUT%\"                     >nul
-copy /Y "%BUILD%\x86\Release\officehost.exe"   "%OUT%\officehost_x86.exe"   >nul
+copy /Y "%BUILD%\x86\Release\tcoffice.wlx"       "%OUT%\"                          >nul
+copy /Y "%BUILD%\x86\Release\tcoffice_host.exe"  "%OUT%\tcoffice_host_x86.exe"     >nul
 
 echo.
 echo === Done ===

@@ -5,7 +5,7 @@
  *   1. TC calls ListLoad / ListLoadW with a file path and the parent HWND.
  *   2. The plugin creates a child window inside that parent (rendering target).
  *   3. It creates a named pipe (server side, overlapped) and spawns
- *      officehost.exe with --hwnd <child> --pipe <name>.
+ *      tcoffice_host.exe with --hwnd <child> --pipe <name>.
  *   4. ConnectNamedPipe waits with a 5-second timeout; if the host process
  *      exits before connecting, the wait returns early.
  *   5. Once connected, the plugin sends "LOAD <path>". The host CoCreateInstances
@@ -33,7 +33,7 @@
 struct PreviewSession
 {
     HWND            hwndChild   = nullptr;      // rendering target
-    HANDLE          hProcess    = nullptr;      // officehost.exe
+    HANDLE          hProcess    = nullptr;      // tcoffice_host.exe
     HANDLE          hPipe       = INVALID_HANDLE_VALUE;
     std::wstring    pipeName;
     std::wstring    currentFile;
@@ -228,9 +228,9 @@ static bool LaunchHost(PreviewSession* session, const std::wstring& file)
     // Each bitness of the plugin ships its own host EXE; both files live in
     // the same TC plugin folder, so they must have distinct names.
 #ifdef _WIN64
-    std::wstring exePath = GetPluginDir() + L"\\officehost.exe";
+    std::wstring exePath = GetPluginDir() + L"\\tcoffice_host.exe";
 #else
-    std::wstring exePath = GetPluginDir() + L"\\officehost_x86.exe";
+    std::wstring exePath = GetPluginDir() + L"\\tcoffice_host_x86.exe";
 #endif
     std::wstringstream cmdLineStream;
     cmdLineStream << L"\"" << exePath << L"\""

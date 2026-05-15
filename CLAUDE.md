@@ -18,11 +18,11 @@ Total Commander process
 └── tcoffice.wlx[64]                    (this repo: plugin DLL, C++/Win32)
     ├── exports ListLoad / ListLoadW / ListCloseWindow / ...
     ├── creates child HWND inside TC's Lister pane
-    └── spawns officehost.exe per session, talks to it over a named pipe
+    └── spawns tcoffice_host.exe per session, talks to it over a named pipe
               │
               │  named pipe   (UTF-16 text protocol: LOAD / RESIZE / CLOSE)
               ▼
-officehost.exe                          (this repo: host EXE, C++/Win32/COM)
+tcoffice_host.exe                          (this repo: host EXE, C++/Win32/COM)
 ├── CoInitializeEx(COINIT_APARTMENTTHREADED)
 ├── CoCreateInstance(CLSID for the file's extension)
 ├── IInitializeWithFile::Initialize / IInitializeWithStream::Initialize
@@ -61,9 +61,9 @@ deliberately removed that because:
 tcoffice.cpp          - plugin DLL (TC Lister plugin entry points)
 tcoffice.def          - DLL exports
 listplug.h            - Lister plugin API (subset used here)
-officehost.cpp        - host EXE (COM preview handler host)
-officehost.manifest   - host EXE manifest (PerMonitorV2 DPI)
-CMakeLists.txt        - builds tcoffice.wlx / .wlx64 and officehost.exe
+tcoffice_host.cpp     - host EXE (COM preview handler host)
+app.manifest          - host EXE manifest (PerMonitorV2 DPI)
+CMakeLists.txt        - builds tcoffice.wlx / .wlx64 and tcoffice_host.exe
 build.cmd             - convenience driver: x86 + x64 + copies to dist/
 README.md             - end-user / contributor docs
 CLAUDE.md             - this file
