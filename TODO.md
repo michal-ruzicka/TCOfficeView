@@ -1,3 +1,9 @@
-- [ ] Make logging optional not to fill our expensive disks.
-- [ ] Create standard Total Commander distribution file.
 - [ ] Describe system requirements in README.md.
+- [ ] Add info page if MS Office is not available on the target system.
+- [ ] Add some open source permissive license.
+- [ ] Create standard Total Commander distribution file.
+- [ ] Add configuration via ini file.
+  - [ ] System wide ini file in Total Commander installation directory.
+    - [ ] User specific ini file in %USERPROFILE% TC config directory that has precendence over the gloval config.
+  - [ ] Make here logging optional (to not overfill our expensive disks) with configuration of log path.
+  - [ ] Add configuration of quick preview or full mode (for Word not showing only web mode view).
