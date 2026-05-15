@@ -129,10 +129,18 @@ struct HostState
 
 static HostState g_state;
 
-// Message IDs used by the worker thread to call into the STA thread.
-// Each handler returns 0 on success, or an HRESULT cast to LRESULT on error.
-static constexpr UINT WM_HOST_LOAD   = WM_USER + 1;
-static constexpr UINT WM_HOST_RESIZE = WM_USER + 2;
+// Message IDs the worker thread posts to the STA window.
+//
+// We use PostMessage (not SendMessage) because cross-thread SendMessage puts
+// the receiving WndProc into the "input-synchronous" state, and COM refuses
+// outgoing calls from there with RPC_E_CANTCALLOUT_ININPUTSYNCCALL. With
+// PostMessage the WndProc runs in a normal message-pump state and
+// CoCreateInstance works.
+//
+// Ownership of lParam payloads (for WM_HOST_LOAD) transfers from the worker
+// to the WndProc handler, which is responsible for freeing.
+static constexpr UINT WM_HOST_LOAD   = WM_USER + 1;     // lParam = wchar_t* (heap, delete[])
+static constexpr UINT WM_HOST_RESIZE = WM_USER + 2;     // wParam = MAKELONG(w, h)
 static constexpr UINT WM_HOST_CLOSE  = WM_USER + 3;
 
 // ---------------------------------------------------------------------------
@@ -439,15 +447,30 @@ static void ResizeHandlerSta(int w, int h)
 // STA window procedure
 // ---------------------------------------------------------------------------
 
+static BOOL PipeWriteUtf16(HANDLE h, LPCWSTR text);    // defined below
+
 static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
         case WM_HOST_LOAD:
         {
-            LPCWSTR path = reinterpret_cast<LPCWSTR>(lp);
+            wchar_t* path = reinterpret_cast<wchar_t*>(lp);
             HRESULT hr = LoadHandlerSta(path);
-            return SUCCEEDED(hr) ? 0 : static_cast<LRESULT>(static_cast<long>(hr));
+            if (SUCCEEDED(hr))
+            {
+                PipeWriteUtf16(g_state.hPipe, L"OK\n");
+            }
+            else
+            {
+                wchar_t errMsg[96] = {};
+                _snwprintf_s(errMsg, ARRAYSIZE(errMsg), _TRUNCATE,
+                             L"ERR LoadHandler hr=0x%08lX\n",
+                             static_cast<long>(hr));
+                PipeWriteUtf16(g_state.hPipe, errMsg);
+            }
+            delete[] path;
+            return 0;
         }
         case WM_HOST_RESIZE:
         {
@@ -461,6 +484,7 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             HostLog(L"WM_HOST_CLOSE");
             UnloadHandlerSta();
             DestroyRenderWindowSta();
+            PipeWriteUtf16(g_state.hPipe, L"OK\n");
             PostQuitMessage(0);
             return 0;
         }
@@ -539,20 +563,18 @@ static DWORD WINAPI PipeReaderThread(LPVOID)
 
         if (wcsncmp(buf, L"LOAD ", 5) == 0)
         {
-            LRESULT r = SendMessageW(g_state.hwndSta, WM_HOST_LOAD,
-                                     0, reinterpret_cast<LPARAM>(buf + 5));
-            if (r == 0)
+            // Copy the path onto the heap; ownership transfers to the WndProc
+            // handler on the STA thread, which deletes it after processing.
+            size_t pathChars = wcslen(buf + 5);
+            auto* heapPath = new wchar_t[pathChars + 1];
+            wcscpy_s(heapPath, pathChars + 1, buf + 5);
+            if (!PostMessageW(g_state.hwndSta, WM_HOST_LOAD,
+                              0, reinterpret_cast<LPARAM>(heapPath)))
             {
-                PipeWriteUtf16(g_state.hPipe, L"OK\n");
+                delete[] heapPath;
+                PipeWriteUtf16(g_state.hPipe, L"ERR PostMessage failed\n");
             }
-            else
-            {
-                wchar_t errMsg[96] = {};
-                _snwprintf_s(errMsg, ARRAYSIZE(errMsg), _TRUNCATE,
-                             L"ERR LoadHandler hr=0x%08lX\n",
-                             static_cast<long>(r));
-                PipeWriteUtf16(g_state.hPipe, errMsg);
-            }
+            // STA writes the OK / ERR response itself once the load completes.
         }
         else if (wcsncmp(buf, L"RESIZE ", 7) == 0)
         {
@@ -560,14 +582,14 @@ static DWORD WINAPI PipeReaderThread(LPVOID)
             if (swscanf_s(buf + 7, L"%d %d", &w, &h) == 2 && w > 0 && h > 0)
             {
                 WPARAM wp = MAKELONG(w, h);
-                SendMessageW(g_state.hwndSta, WM_HOST_RESIZE, wp, 0);
+                PostMessageW(g_state.hwndSta, WM_HOST_RESIZE, wp, 0);
             }
             // RESIZE is fire-and-forget — no response.
         }
         else if (wcsncmp(buf, L"CLOSE", 5) == 0)
         {
-            SendMessageW(g_state.hwndSta, WM_HOST_CLOSE, 0, 0);
-            PipeWriteUtf16(g_state.hPipe, L"OK\n");
+            // STA's WM_HOST_CLOSE handler writes "OK" and posts WM_QUIT.
+            PostMessageW(g_state.hwndSta, WM_HOST_CLOSE, 0, 0);
             gracefulClose = true;
             break;
         }
