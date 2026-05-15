@@ -1,0 +1,50 @@
+# Build output
+/build/
+/dist/
+
+# CMake (in case someone runs cmake from the repo root by accident)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeUserPresets.json
+
+# MSVC / Visual Studio
+.vs/
+*.user
+*.suo
+*.opensdf
+*.sdf
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.idb
+*.tlog
+*.lastbuildstate
+*.log
+
+# Final artifacts (built into dist/, but guard against stray copies at the root)
+*.wlx
+*.wlx64
+*.exe
+*.dll
+
+# JetBrains / Rider
+.idea/
+*.iml
+
+# VS Code (keep workspace-level config out of the repo unless intentionally shared)
+.vscode/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor temp
+*.swp
+*~

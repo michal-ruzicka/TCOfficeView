@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="1.0.0.0" name="OfficePreviewHost"/>
+  <assemblyIdentity version="1.0.0.0" name="officehost"/>
 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
@@ -10,7 +10,7 @@
     </security>
   </trustInfo>
 
-  <!-- Per-monitor DPI awareness - důležité pro správné rendering Office preview -->
+  <!-- Per-monitor DPI awareness — required for crisp Office preview rendering on HiDPI displays. -->
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>

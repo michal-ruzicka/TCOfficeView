@@ -1,6 +1,6 @@
 /*
- * Total Commander Lister Plugin API
- * Zjednodušená verze - viz oficiální dokumentace TC pro úplnou specifikaci
+ * Total Commander Lister Plugin API.
+ * Minimal subset — see the official TC writers' guide for the full spec:
  * https://www.ghisler.ch/wiki/index.php?title=Lister_plugin_writers_guide
  */
 #ifndef LISTPLUG_H

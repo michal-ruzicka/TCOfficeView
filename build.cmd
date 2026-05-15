@@ -1,10 +1,15 @@
 @echo off
 REM ===========================================================================
-REM Build script pro TC Office Lister plugin
+REM Build script for the TC Office Lister plugin.
 REM
-REM Předpoklady:
-REM   - Visual Studio 2022 Build Tools (s C++ workload)
-REM   - .NET 8 SDK
+REM Builds both bitnesses with CMake and copies the artifacts into dist\:
+REM   - tcoffice.wlx        (32-bit plugin DLL)
+REM   - tcoffice.wlx64      (64-bit plugin DLL)
+REM   - officehost.exe      (64-bit host EXE)
+REM   - officehost_x86.exe  (32-bit host EXE)
+REM
+REM Prerequisites:
+REM   - Visual Studio 2022 Build Tools, workload "Desktop development with C++"
 REM   - CMake 3.20+
 REM ===========================================================================
 
@@ -15,40 +20,25 @@ set BUILD=%ROOT%build
 set OUT=%ROOT%dist
 
 if not exist "%BUILD%" mkdir "%BUILD%"
-if not exist "%OUT%" mkdir "%OUT%"
+if not exist "%OUT%"   mkdir "%OUT%"
 
 echo.
-echo === Building C++ plugin (x64) ===
-cmake -S "%ROOT%plugin" -B "%BUILD%\plugin-x64" -A x64
+echo === Configure + build (x64) ===
+cmake -S "%ROOT%" -B "%BUILD%\x64" -A x64
 if errorlevel 1 goto :error
-cmake --build "%BUILD%\plugin-x64" --config Release
+cmake --build "%BUILD%\x64" --config Release
 if errorlevel 1 goto :error
-copy "%BUILD%\plugin-x64\Release\tcoffice.wlx64" "%OUT%\" >nul
+copy /Y "%BUILD%\x64\Release\tcoffice.wlx64"   "%OUT%\"                     >nul
+copy /Y "%BUILD%\x64\Release\officehost.exe"   "%OUT%\officehost.exe"       >nul
 
 echo.
-echo === Building C++ plugin (x86) ===
-cmake -S "%ROOT%plugin" -B "%BUILD%\plugin-x86" -A Win32
+echo === Configure + build (x86) ===
+cmake -S "%ROOT%" -B "%BUILD%\x86" -A Win32
 if errorlevel 1 goto :error
-cmake --build "%BUILD%\plugin-x86" --config Release
+cmake --build "%BUILD%\x86" --config Release
 if errorlevel 1 goto :error
-copy "%BUILD%\plugin-x86\Release\tcoffice.wlx" "%OUT%\" >nul
-
-echo.
-echo === Building C# host (x64) ===
-dotnet publish "%ROOT%host\OfficePreviewHost.csproj" ^
-    -c Release -r win-x64 --self-contained false ^
-    -o "%BUILD%\host-x64"
-if errorlevel 1 goto :error
-copy "%BUILD%\host-x64\OfficePreviewHost.exe" "%OUT%\OfficePreviewHost.exe" >nul
-
-echo.
-echo === Building C# host (x86) ===
-dotnet publish "%ROOT%host\OfficePreviewHost.csproj" ^
-    -c Release -r win-x86 --self-contained false ^
-    -o "%BUILD%\host-x86"
-if errorlevel 1 goto :error
-REM Pro 32-bit TC použijeme 32-bit verzi exe - sufix _x86
-copy "%BUILD%\host-x86\OfficePreviewHost.exe" "%OUT%\OfficePreviewHost_x86.exe" >nul
+copy /Y "%BUILD%\x86\Release\tcoffice.wlx"     "%OUT%\"                     >nul
+copy /Y "%BUILD%\x86\Release\officehost.exe"   "%OUT%\officehost_x86.exe"   >nul
 
 echo.
 echo === Done ===
