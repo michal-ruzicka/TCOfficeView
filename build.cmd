@@ -15,9 +15,12 @@ REM ===========================================================================
 
 setlocal enabledelayedexpansion
 
+REM %~dp0 expands with a trailing backslash; quoting "%ROOT%\" then escapes the
+REM closing quote and breaks command-line parsing for cmake. Strip it.
 set ROOT=%~dp0
-set BUILD=%ROOT%build
-set OUT=%ROOT%dist
+if "%ROOT:~-1%"=="\" set ROOT=%ROOT:~0,-1%
+set BUILD=%ROOT%\build
+set OUT=%ROOT%\dist
 
 if not exist "%BUILD%" mkdir "%BUILD%"
 if not exist "%OUT%"   mkdir "%OUT%"
