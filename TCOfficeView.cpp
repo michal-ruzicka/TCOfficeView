@@ -2,13 +2,13 @@
 // Copyright 2026 Michal Růžička <ruzicka.mich@gmail.com>
 
 /*
- * tcoffice.cpp - Total Commander Lister plugin for MS Office documents.
+ * TCOfficeView.cpp - Total Commander Lister plugin for MS Office documents.
  *
  * Flow:
  *   1. TC calls ListLoad / ListLoadW with a file path and the parent HWND.
  *   2. The plugin creates a child window inside that parent (rendering target).
  *   3. It creates a named pipe (server side, overlapped) and spawns
- *      tcoffice_host.exe with --hwnd <child> --pipe <name>.
+ *      TCOfficeViewHost.exe with --hwnd <child> --pipe <name>.
  *   4. ConnectNamedPipe waits with a 5-second timeout; if the host process
  *      exits before connecting, the wait returns early.
  *   5. Once connected, the plugin sends "LOAD <path>". The host CoCreateInstances
@@ -36,7 +36,7 @@
 struct PreviewSession
 {
     HWND            hwndChild   = nullptr;      // rendering target
-    HANDLE          hProcess    = nullptr;      // tcoffice_host.exe
+    HANDLE          hProcess    = nullptr;      // TCOfficeViewHost.exe
     HANDLE          hPipe       = INVALID_HANDLE_VALUE;
     std::wstring    pipeName;
     std::wstring    currentFile;
@@ -46,7 +46,7 @@ static std::map<HWND, PreviewSession*> g_sessions;
 static std::mutex                       g_sessionsMutex;
 static HINSTANCE                        g_hInstance = nullptr;
 
-static const wchar_t* kWndClassName  = L"TCOfficePreviewHost";
+static const wchar_t* kWndClassName  = L"TCOfficeViewPreview";
 static const UINT_PTR kResizeTimerId = 1;
 
 // ---------------------------------------------------------------------------
@@ -64,9 +64,9 @@ static std::wstring GetPluginDir()
 
 static std::wstring MakePipeName()
 {
-    // \\.\pipe\tcoffice_<pid>_<tick>
+    // \\.\pipe\TCOfficeView_<pid>_<tick>
     wchar_t buf[128] = {};
-    swprintf_s(buf, L"\\\\.\\pipe\\tcoffice_%lu_%llu",
+    swprintf_s(buf, L"\\\\.\\pipe\\TCOfficeView_%lu_%llu",
                GetCurrentProcessId(),
                static_cast<unsigned long long>(GetTickCount64()));
     return buf;
@@ -231,9 +231,9 @@ static bool LaunchHost(PreviewSession* session, const std::wstring& file)
     // Each bitness of the plugin ships its own host EXE; both files live in
     // the same TC plugin folder, so they must have distinct names.
 #ifdef _WIN64
-    std::wstring exePath = GetPluginDir() + L"\\tcoffice_host.exe";
+    std::wstring exePath = GetPluginDir() + L"\\TCOfficeViewHost.exe";
 #else
-    std::wstring exePath = GetPluginDir() + L"\\tcoffice_host_x86.exe";
+    std::wstring exePath = GetPluginDir() + L"\\TCOfficeViewHost_x86.exe";
 #endif
     std::wstringstream cmdLineStream;
     cmdLineStream << L"\"" << exePath << L"\""

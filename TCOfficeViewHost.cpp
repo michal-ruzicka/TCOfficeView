@@ -2,17 +2,17 @@
 // Copyright 2026 Michal Růžička <ruzicka.mich@gmail.com>
 
 /*
- * tcoffice_host.cpp - Total Commander Office preview host process.
+ * TCOfficeViewHost.cpp - Total Commander Office preview host process.
  *
- * Spawned by tcoffice.wlx. Hosts a Windows Preview Handler COM object and
- * renders it inside Total Commander's Lister pane.
+ * Spawned by TCOfficeView.wlx. Hosts a Windows Preview Handler COM object
+ * and renders it inside Total Commander's Lister pane.
  *
  * Window topology:
  *
  *      Total Commander process              this host process
  *      ---------------------                ------------------
  *      Lister parent
- *        └── plugin child   (tcoffice DLL)
+ *        └── plugin child   (TCOfficeView DLL)
  *              └── (SetParent) ─────────── render window  (this process)
  *                                              └── preview handler's
  *                                                  internal windows
@@ -54,7 +54,7 @@
 // ---------------------------------------------------------------------------
 // Diagnostic logging
 //
-// Writes to %TEMP%\tcoffice_host.log. Cheap and synchronous so we can trace
+// Writes to %TEMP%\TCOfficeViewHost.log. Cheap and synchronous so we can trace
 // the exact step that fails when a preview doesn't render. Set
 // HOST_LOG_ENABLED to 0 to silence.
 // ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ static void HostLog(const wchar_t* fmt, ...)
     {
         wchar_t path[MAX_PATH] = {};
         GetTempPathW(MAX_PATH, path);
-        wcscat_s(path, L"tcoffice_host.log");
+        wcscat_s(path, L"TCOfficeViewHost.log");
         hLog = CreateFileW(path, FILE_APPEND_DATA,
                            FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -215,7 +215,7 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
 // Render window (in this process) reparented into the plugin's HWND.
 // ---------------------------------------------------------------------------
 
-static const wchar_t* kRenderClassName = L"TCOfficeHostRender";
+static const wchar_t* kRenderClassName = L"TCOfficeViewHostRender";
 
 static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -630,7 +630,7 @@ static bool ParseArgs(int argc, wchar_t** argv, HWND* outHwnd, std::wstring* out
 
 static HWND CreateStaWindow(HINSTANCE hInst)
 {
-    static const wchar_t* kClass = L"TCOfficeHostSta";
+    static const wchar_t* kClass = L"TCOfficeViewHostSta";
     WNDCLASSW wc = {};
     wc.lpfnWndProc   = StaWndProc;
     wc.hInstance     = hInst;

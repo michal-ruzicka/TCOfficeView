@@ -1,6 +1,6 @@
 @echo off
 REM ===========================================================================
-REM Build script for the TC Office Lister plugin.
+REM Build script for the TCOfficeView Lister plugin.
 REM
 REM Builds both bitnesses with CMake, stages the artifacts under build\stage\,
 REM and packages them into a Total Commander auto-install ZIP whose name
@@ -10,15 +10,15 @@ REM
 REM Layout after a successful build:
 REM
 REM   build\stage\
-REM     tcoffice.wlx              (32-bit plugin DLL)
-REM     tcoffice.wlx64            (64-bit plugin DLL)
-REM     tcoffice_host.exe         (64-bit host EXE)
-REM     tcoffice_host_x86.exe     (32-bit host EXE)
-REM     pluginst.inf              (TC auto-installer metadata)
-REM     *.md                      (all repo-root Markdown docs)
+REM     TCOfficeView.wlx              (32-bit plugin DLL)
+REM     TCOfficeView.wlx64            (64-bit plugin DLL)
+REM     TCOfficeViewHost.exe          (64-bit host EXE)
+REM     TCOfficeViewHost_x86.exe      (32-bit host EXE)
+REM     pluginst.inf                  (TC auto-installer metadata)
+REM     *.md                          (all repo-root Markdown docs)
 REM   dist\
-REM     tcoffice.v<version>.zip   (distributable bundle)
-REM     ...                       (any older versioned ZIPs are kept)
+REM     TCOfficeView.v<version>.zip   (distributable bundle)
+REM     ...                           (any older versioned ZIPs are kept)
 REM
 REM Prerequisites:
 REM   - Visual Studio 2022 Build Tools, workload "Desktop development with C++"
@@ -58,12 +58,12 @@ echo === Stage ===
 if exist "%STAGE%" rmdir /S /Q "%STAGE%"
 mkdir "%STAGE%"
 
-copy /Y "%BUILD%\x64\Release\tcoffice.wlx64"     "%STAGE%\"                          >nul
-copy /Y "%BUILD%\x64\Release\tcoffice_host.exe"  "%STAGE%\tcoffice_host.exe"         >nul
-copy /Y "%BUILD%\x86\Release\tcoffice.wlx"       "%STAGE%\"                          >nul
-copy /Y "%BUILD%\x86\Release\tcoffice_host.exe"  "%STAGE%\tcoffice_host_x86.exe"     >nul
-copy /Y "%ROOT%\pluginst.inf"                    "%STAGE%\"                          >nul
-copy /Y "%ROOT%\*.md"                            "%STAGE%\"                          >nul
+copy /Y "%BUILD%\x64\Release\TCOfficeView.wlx64"        "%STAGE%\"                              >nul
+copy /Y "%BUILD%\x64\Release\TCOfficeViewHost.exe"      "%STAGE%\TCOfficeViewHost.exe"          >nul
+copy /Y "%BUILD%\x86\Release\TCOfficeView.wlx"          "%STAGE%\"                              >nul
+copy /Y "%BUILD%\x86\Release\TCOfficeViewHost.exe"      "%STAGE%\TCOfficeViewHost_x86.exe"      >nul
+copy /Y "%ROOT%\pluginst.inf"                           "%STAGE%\"                              >nul
+copy /Y "%ROOT%\*.md"                                   "%STAGE%\"                              >nul
 
 echo.
 echo === Package ===
@@ -77,7 +77,7 @@ if "%VERSION%"=="" (
     goto :error
 )
 
-set ZIP=%OUT%\tcoffice.v%VERSION%.zip
+set ZIP=%OUT%\TCOfficeView.v%VERSION%.zip
 echo Building %ZIP%
 powershell -NoLogo -NoProfile -Command ^
     "Compress-Archive -Force -DestinationPath '%ZIP%' -Path '%STAGE%\*'"

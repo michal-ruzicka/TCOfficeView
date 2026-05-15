@@ -1,4 +1,4 @@
-# TCOffice — project notes for Claude
+# TCOfficeView — project notes for Claude
 
 ## What this is
 
@@ -15,14 +15,14 @@ Two artifacts, one process boundary between them:
 
 ```
 Total Commander process
-└── tcoffice.wlx[64]                    (this repo: plugin DLL, C++/Win32)
+└── TCOfficeView.wlx[64]                    (this repo: plugin DLL, C++/Win32)
     ├── exports ListLoad / ListLoadW / ListCloseWindow / ...
     ├── creates child HWND inside TC's Lister pane
-    └── spawns tcoffice_host.exe per session, talks to it over a named pipe
+    └── spawns TCOfficeViewHost.exe per session, talks to it over a named pipe
               │
               │  named pipe   (UTF-16 text protocol: LOAD / RESIZE / CLOSE)
               ▼
-tcoffice_host.exe                          (this repo: host EXE, C++/Win32/COM)
+TCOfficeViewHost.exe                          (this repo: host EXE, C++/Win32/COM)
 ├── CoInitializeEx(COINIT_APARTMENTTHREADED)
 ├── CoCreateInstance(CLSID for the file's extension)
 ├── IInitializeWithFile::Initialize / IInitializeWithStream::Initialize
@@ -58,15 +58,15 @@ deliberately removed that because:
 ## Repo layout (flat)
 
 ```
-tcoffice.cpp          - plugin DLL (TC Lister plugin entry points)
-tcoffice.def          - DLL exports
+TCOfficeView.cpp          - plugin DLL (TC Lister plugin entry points)
+TCOfficeView.def          - DLL exports
 listplug.h            - Lister plugin API (subset used here)
-tcoffice_host.cpp     - host EXE (COM preview handler host)
+TCOfficeViewHost.cpp     - host EXE (COM preview handler host)
 app.manifest          - host EXE manifest (PerMonitorV2 DPI)
 pluginst.inf          - TC auto-installer metadata; canonical version source
-CMakeLists.txt        - builds tcoffice.wlx / .wlx64 and tcoffice_host.exe
+CMakeLists.txt        - builds TCOfficeView.wlx / .wlx64 and TCOfficeViewHost.exe
 build.cmd             - convenience driver: x86 + x64, copies to dist/,
-                        and packages dist into tcoffice.v<version>.zip
+                        and packages dist into TCOfficeView.v<version>.zip
 README.md             - end-user / contributor docs
 CLAUDE.md             - this file
 ```

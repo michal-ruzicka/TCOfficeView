@@ -1,6 +1,6 @@
 [plugininstall]
 type=wlx
-file=tcoffice.wlx
+file=TCOfficeView.wlx
 description=Preview MS Office documents (DOCX, XLSX, PPTX, RTF, VSDX, MSG, ...) via the Windows Preview Handlers registered by Office. Hosts the handlers out-of-process for stability and STA correctness.
-defaultdir=tcoffice
+defaultdir=TCOfficeView
 version=0.1.0
