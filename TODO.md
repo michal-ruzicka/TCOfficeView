@@ -1,0 +1,3 @@
+- [ ] Make logging optional not to fill our expensive disks.
+- [ ] Create standard Total Commander distribution file.
+- [ ] Describe system requirements in README.md.
