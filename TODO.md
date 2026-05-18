@@ -8,7 +8,7 @@
   - [x] System wide ini file in Total Commander installation directory.
     - [x] User specific ini file in `%AppData%\GHISLER` TC config directory that has precedence over the global config.
   - [x] Make here logging optional (to not overfill our expensive disks) with configuration of log path.
-- [ ] Create private repository on GitHub.
+- [x] Create private repository on GitHub.
   - [ ] Setup standard development process – merge requests from `develop` branch to protected `main` branch.
   - [ ] Setup standard build and release process with GitHub actions on tags on `main` branch.
   - [ ] Make the repo public.

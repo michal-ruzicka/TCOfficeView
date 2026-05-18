@@ -2,6 +2,11 @@
 
 **This document is for developers who want to build, modify or extend the plugin.**
 
+The project lives at <https://github.com/michal-ruzicka/TCOfficeView>. Bug
+reports and patches are welcome via the project's
+[issue tracker](https://github.com/michal-ruzicka/TCOfficeView/issues) and
+[pull requests](https://github.com/michal-ruzicka/TCOfficeView/pulls).
+
 ## Prerequisites
 
 - [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/) with

@@ -93,9 +93,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
-<!--
-Compare URLs go here once the project has a public remote, e.g.:
-
-[Unreleased]: https://github.com/<owner>/TCOfficeView/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/<owner>/TCOfficeView/releases/tag/v0.1.0
--->
+[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/michal-ruzicka/TCOfficeView/releases/tag/v0.1.0
