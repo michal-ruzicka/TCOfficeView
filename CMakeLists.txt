@@ -11,6 +11,14 @@ add_compile_definitions(
     NOMINMAX
 )
 
+# Source files are UTF-8 (no BOM). Without /utf-8 MSVC interprets non-ASCII
+# bytes in the source using the system ANSI code page, which produces
+# mojibake in L"..." wide string literals on machines whose ACP isn't UTF-8.
+# /utf-8 is equivalent to /source-charset:utf-8 /execution-charset:utf-8.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # Link the static C/C++ runtime so the artifacts have no vcruntime*.dll
 # dependency. Total Commander users expect drop-in install.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")

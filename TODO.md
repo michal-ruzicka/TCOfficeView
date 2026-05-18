@@ -1,5 +1,5 @@
 - [ ] Describe system requirements in README.md.
-- [ ] Add info page if MS Office is not available on the target system.
+- [x] Add info page if MS Office is not available on the target system.
 - [x] Add some open source permissive license.
 - [x] Create standard Total Commander ZIP distribution archive.
 - [x] Add configuration via ini file.

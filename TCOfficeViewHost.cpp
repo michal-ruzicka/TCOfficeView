@@ -64,7 +64,9 @@
 // %LocalAppData%). See the shipped sample INI for the full key reference.
 // ---------------------------------------------------------------------------
 
-static std::wstring g_logPath;   // empty → diagnostic logging is disabled
+static std::wstring g_logPath;       // empty → diagnostic logging is disabled
+static std::wstring g_fontFamily;    // empty → auto-pick from a fallback list
+static int          g_fontSize = 12;
 
 static std::wstring ExpandEnv(LPCWSTR s)
 {
@@ -92,9 +94,19 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     if (GetFileAttributesW(iniPath.c_str()) == INVALID_FILE_ATTRIBUTES)
         return false;
     wchar_t buf[2048] = {};
+
     GetPrivateProfileStringW(L"Logging", L"LogPath", L"",
                              buf, ARRAYSIZE(buf), iniPath.c_str());
     g_logPath = ExpandEnv(buf);
+
+    GetPrivateProfileStringW(L"FallbackUI", L"FontFamily", L"",
+                             buf, ARRAYSIZE(buf), iniPath.c_str());
+    g_fontFamily = buf;
+
+    g_fontSize = GetPrivateProfileIntW(L"FallbackUI", L"FontSize",
+                                       12, iniPath.c_str());
+    if (g_fontSize < 6)  g_fontSize = 6;     // clamp to a sane range
+    if (g_fontSize > 72) g_fontSize = 72;
     return true;
 }
 
@@ -199,6 +211,8 @@ struct HostState
     HWND                hwndPluginChild = nullptr;        // window inside TC, supplied on cmd line
     HWND                hwndRender      = nullptr;        // our own child, reparented into hwndPluginChild
     HWND                hwndSta         = nullptr;        // message-only window for cross-thread dispatch
+    HWND                hwndFallback    = nullptr;        // read-only EDIT shown when no preview handler is usable
+    HFONT               hFallbackFont   = nullptr;        // font owned by us, freed when hwndFallback is hidden
     HANDLE              hPipe           = INVALID_HANDLE_VALUE;
     IUnknown*           pHandlerUnk     = nullptr;        // raw COM object
     IPreviewHandler*    pHandler        = nullptr;        // queried IPreviewHandler view
@@ -373,11 +387,247 @@ static void DestroyRenderWindowSta()
 }
 
 // ---------------------------------------------------------------------------
+// Fallback UI
+//
+// Displayed inside the render window whenever a real preview is not
+// available — most commonly because MS Office is not installed (so no
+// preview handler is registered for the file extension), but also when a
+// registered handler fails to load. A read-only multi-line EDIT control
+// shows an explanatory message plus whatever metadata we can extract from
+// the file system, so the user still gets something useful in the Lister
+// pane instead of an empty panel.
+// ---------------------------------------------------------------------------
+
+static int CALLBACK FontExistsCallback(const LOGFONTW*, const TEXTMETRICW*,
+                                       DWORD, LPARAM lp)
+{
+    *reinterpret_cast<bool*>(lp) = true;
+    return 0;   // stop enumerating — one hit is all we need
+}
+
+static bool FontInstalled(LPCWSTR family)
+{
+    HDC hdc = GetDC(nullptr);
+    if (!hdc) return false;
+    LOGFONTW lf = {};
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcscpy_s(lf.lfFaceName, ARRAYSIZE(lf.lfFaceName), family);
+    bool found = false;
+    EnumFontFamiliesExW(hdc, &lf, FontExistsCallback,
+                        reinterpret_cast<LPARAM>(&found), 0);
+    ReleaseDC(nullptr, hdc);
+    return found;
+}
+
+// Pick the first monospace face that actually exists on this system.
+// Order: Microsoft's most recent, modern, polished offering first; then
+// progressively older / more boring options. The final entry is "Courier
+// New" which has shipped with every Windows since 3.x — guaranteed.
+static LPCWSTR AutoPickFontFamily()
+{
+    static const wchar_t* kCandidates[] = {
+        L"Aptos Mono",      // Microsoft 365 / Office 2024
+        L"Consolas",        // ships with Windows Vista+
+        L"Cascadia Mono",   // ships with newer Windows / Windows Terminal
+        L"Lucida Console",  // ships with Windows 2000+
+    };
+    for (LPCWSTR name : kCandidates)
+        if (FontInstalled(name)) return name;
+    return L"Courier New";
+}
+
+// Build a fresh HFONT sized for the actual DPI of the target window. We
+// recreate it on every ShowFallbackSta call so that moving the Lister
+// across monitors between previews picks up the new DPI.
+static HFONT CreateFallbackFont(HWND hwnd)
+{
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;   // 96
+    int pixelHeight = -MulDiv(g_fontSize, dpi, USER_DEFAULT_SCREEN_DPI);
+
+    LPCWSTR family = g_fontFamily.empty()
+        ? AutoPickFontFamily()
+        : g_fontFamily.c_str();
+
+    HostLog(L"  CreateFallbackFont: family='%s' size=%dpt dpi=%u",
+            family, g_fontSize, dpi);
+
+    return CreateFontW(pixelHeight, 0, 0, 0,
+                       FW_NORMAL, FALSE, FALSE, FALSE,
+                       DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                       CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, family);
+}
+
+static std::wstring FormatFileSize(ULONGLONG bytes)
+{
+    wchar_t scaled[32] = {};
+    if (bytes < 1024ULL)
+        _snwprintf_s(scaled, _TRUNCATE, L"%llu B", bytes);
+    else if (bytes < 1024ULL * 1024)
+        _snwprintf_s(scaled, _TRUNCATE, L"%.1f KB", bytes / 1024.0);
+    else if (bytes < 1024ULL * 1024 * 1024)
+        _snwprintf_s(scaled, _TRUNCATE, L"%.1f MB", bytes / (1024.0 * 1024));
+    else
+        _snwprintf_s(scaled, _TRUNCATE, L"%.2f GB", bytes / (1024.0 * 1024 * 1024));
+
+    wchar_t raw[48] = {};
+    _snwprintf_s(raw, _TRUNCATE, L"  (%llu bytes)", bytes);
+    return std::wstring(scaled) + raw;
+}
+
+static std::wstring FormatFileTime(const FILETIME& ft)
+{
+    if (ft.dwLowDateTime == 0 && ft.dwHighDateTime == 0) return L"(not set)";
+    FILETIME local = {};
+    if (!FileTimeToLocalFileTime(&ft, &local)) return L"(?)";
+    SYSTEMTIME st = {};
+    if (!FileTimeToSystemTime(&local, &st)) return L"(?)";
+    wchar_t buf[64] = {};
+    _snwprintf_s(buf, _TRUNCATE, L"%04u-%02u-%02u %02u:%02u:%02u",
+                 st.wYear, st.wMonth, st.wDay,
+                 st.wHour, st.wMinute, st.wSecond);
+    return buf;
+}
+
+static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
+{
+    std::wstring text;
+
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        text += L"No MS Office preview handler is registered for this file.\r\n";
+        text += L"\r\n";
+        text += L"TCOfficeView renders previews by hosting the Windows Preview\r\n";
+        text += L"Handlers that Microsoft Office registers when it is installed.\r\n";
+        text += L"No such handler was found on this computer for this file type.\r\n";
+        text += L"\r\n";
+        text += L"To enable full document previews, install Microsoft Office\r\n";
+        text += L"(any edition that includes the relevant application — Word\r\n";
+        text += L"for DOC/DOCX, Excel for XLS/XLSX, PowerPoint for PPT/PPTX,\r\n";
+        text += L"Outlook for MSG, Visio for VSD/VSDX, ...).\r\n";
+    }
+    else
+    {
+        wchar_t lead[256] = {};
+        _snwprintf_s(lead, _TRUNCATE,
+                     L"This file could not be previewed.\r\n"
+                     L"\r\n"
+                     L"The registered preview handler failed to load it\r\n"
+                     L"(HRESULT 0x%08lX). Office may be installed but the\r\n"
+                     L"handler is broken or the file itself may be corrupted.\r\n",
+                     static_cast<long>(hr));
+        text += lead;
+    }
+
+    text += L"\r\n";
+    text += L"--------------------------------------------------------------\r\n";
+    text += L"File information\r\n";
+    text += L"\r\n";
+
+    LPCWSTR fname = wcsrchr(path, L'\\');
+    fname = fname ? fname + 1 : path;
+    text += L"  Name:        ";
+    text += fname;
+    text += L"\r\n";
+    text += L"  Path:        ";
+    text += path;
+    text += L"\r\n";
+
+    LPCWSTR ext = wcsrchr(path, L'.');
+    if (ext && ext[1])
+    {
+        text += L"  Extension:   ";
+        text += ext;
+        text += L"\r\n";
+    }
+
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fad))
+    {
+        ULARGE_INTEGER size;
+        size.HighPart = fad.nFileSizeHigh;
+        size.LowPart  = fad.nFileSizeLow;
+        text += L"  Size:        ";
+        text += FormatFileSize(size.QuadPart);
+        text += L"\r\n";
+        text += L"  Modified:    ";
+        text += FormatFileTime(fad.ftLastWriteTime);
+        text += L"\r\n";
+        text += L"  Created:     ";
+        text += FormatFileTime(fad.ftCreationTime);
+        text += L"\r\n";
+        text += L"  Accessed:    ";
+        text += FormatFileTime(fad.ftLastAccessTime);
+        text += L"\r\n";
+    }
+    else
+    {
+        wchar_t err[64] = {};
+        _snwprintf_s(err, _TRUNCATE,
+                     L"  (file attributes could not be read, err=%lu)\r\n",
+                     GetLastError());
+        text += err;
+    }
+
+    return text;
+}
+
+static void HideFallbackSta()
+{
+    if (g_state.hwndFallback)
+    {
+        DestroyWindow(g_state.hwndFallback);
+        g_state.hwndFallback = nullptr;
+    }
+    if (g_state.hFallbackFont)
+    {
+        DeleteObject(g_state.hFallbackFont);
+        g_state.hFallbackFont = nullptr;
+    }
+}
+
+static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
+{
+    HideFallbackSta();
+    if (!g_state.hwndRender) return false;
+
+    RECT rc = {};
+    GetClientRect(g_state.hwndRender, &rc);
+
+    HWND hEdit = CreateWindowExW(
+        0, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_LEFT,
+        0, 0, rc.right - rc.left, rc.bottom - rc.top,
+        g_state.hwndRender, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (!hEdit)
+    {
+        HostLog(L"  ShowFallbackSta: CreateWindowEx(EDIT) failed err=%lu",
+                GetLastError());
+        return false;
+    }
+
+    g_state.hFallbackFont = CreateFallbackFont(g_state.hwndRender);
+    SendMessageW(hEdit, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(g_state.hFallbackFont), TRUE);
+
+    std::wstring body = BuildFallbackText(path, hr);
+    SetWindowTextW(hEdit, body.c_str());
+
+    g_state.hwndFallback = hEdit;
+    HostLog(L"  ShowFallbackSta: displayed fallback UI (hr=0x%08lX)",
+            static_cast<long>(hr));
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Preview handler lifecycle. STA thread only.
 // ---------------------------------------------------------------------------
 
 static void UnloadHandlerSta()
 {
+    HideFallbackSta();
     if (g_state.pHandler)
     {
         g_state.pHandler->Unload();
@@ -400,8 +650,10 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     HRESULT hr = FindPreviewHandlerClsid(path, &clsid);
     if (FAILED(hr))
     {
-        HostLog(L"  FindPreviewHandlerClsid -> 0x%08lX", static_cast<long>(hr));
-        return hr;
+        HostLog(L"  FindPreviewHandlerClsid -> 0x%08lX, showing fallback",
+                static_cast<long>(hr));
+        ShowFallbackSta(path, hr);
+        return S_OK;
     }
     {
         wchar_t clsidStr[64] = {};
@@ -414,7 +666,14 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
                           CLSCTX_LOCAL_SERVER | CLSCTX_INPROC_SERVER,
                           IID_IUnknown, reinterpret_cast<void**>(&pUnk));
     HostLog(L"  CoCreateInstance -> 0x%08lX", static_cast<long>(hr));
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+    {
+        // Handler is registered but the server cannot be activated — typically
+        // a partial / broken Office install. Show the fallback UI rather than
+        // an empty pane.
+        ShowFallbackSta(path, hr);
+        return S_OK;
+    }
 
     bool initialized = false;
 
@@ -466,9 +725,11 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 
     if (!initialized)
     {
-        HostLog(L"  no Initialize* interface succeeded — bailing");
+        HostLog(L"  no Initialize* interface succeeded — showing fallback");
         pUnk->Release();
-        return FAILED(hr) ? hr : E_NOINTERFACE;
+        HRESULT reason = FAILED(hr) ? hr : E_NOINTERFACE;
+        ShowFallbackSta(path, reason);
+        return S_OK;
     }
 
     IPreviewHandler* pPH = nullptr;
@@ -477,7 +738,8 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     if (FAILED(hr))
     {
         pUnk->Release();
-        return hr;
+        ShowFallbackSta(path, hr);
+        return S_OK;
     }
 
     RECT rc = {};
@@ -497,7 +759,8 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     {
         pPH->Release();
         pUnk->Release();
-        return hr;
+        ShowFallbackSta(path, hr);
+        return S_OK;
     }
 
     g_state.pHandlerUnk = pUnk;
@@ -517,6 +780,11 @@ static void ResizeHandlerSta(int w, int h)
     {
         RECT rc = { 0, 0, w, h };
         g_state.pHandler->SetRect(&rc);
+    }
+    if (g_state.hwndFallback)
+    {
+        SetWindowPos(g_state.hwndFallback, nullptr, 0, 0, w, h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 

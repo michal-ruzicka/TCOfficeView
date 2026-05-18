@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-05-18
+
+### Added
+
+- Fallback informational pane shown in place of a preview when no working
+  preview handler is available — most commonly because MS Office is not
+  installed, but also when a registered handler fails to load. The pane
+  explains the situation and lists the file's basic metadata (name, path,
+  extension, size, created / modified / last-accessed timestamps) so the
+  Lister never just shows an empty panel.
+- Font in the fallback panel is DPI-aware — it is configured in points and
+  scaled to the actual monitor DPI when the panel is created.
+- INI keys `[FallbackUI] FontFamily` and `[FallbackUI] FontSize` to
+  override the font. When `FontFamily` is empty (the default) the plugin
+  auto-picks the first installed font from a preference list: Aptos Mono
+  → Consolas → Cascadia Mono → Lucida Console → Courier New.
 
 ## [0.2.0] - 2026-05-15
 

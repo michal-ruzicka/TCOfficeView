@@ -111,6 +111,30 @@ LogPath=%LocalAppData%\TCOfficeView\host.log
 
 Leave the value empty (or comment it out) to disable logging again.
 
+### Customising the fallback information panel
+
+The "MS Office not installed" fallback panel uses a monospace font so that
+the file-metadata block is nicely aligned. The font is DPI-aware — it is
+sized in points and scaled to the actual monitor DPI when the panel is
+created, so the on-screen size is consistent on HiDPI displays.
+
+Under `[FallbackUI]`:
+
+- `FontFamily` — exact font name. Leave empty (the default) to auto-pick
+  the first installed font from:
+  Aptos Mono (ships with Microsoft 365 / Office 2024) →
+  Consolas (Windows Vista+) →
+  Cascadia Mono (newer Windows) →
+  Lucida Console (Windows 2000+) →
+  Courier New (guaranteed final fallback).
+- `FontSize` — font size in points; default `12`, clamped to `6..72`.
+
+```ini
+[FallbackUI]
+FontFamily=Cascadia Code
+FontSize=13
+```
+
 ## Supported formats
 
 Depends on which Preview Handlers are installed on the system. With Office
@@ -124,9 +148,29 @@ installed you typically get:
 | Visio       | VSD, VSDX |
 | Outlook     | MSG |
 
-The plugin advertises support for the union of these extensions; if a
-specific handler is not installed, the host falls back gracefully and TC
-will use its built-in viewer instead.
+The plugin advertises support for the union of these extensions. When a
+specific handler is not installed (for example because MS Office is not
+present), the Lister pane shows an informational message together with
+the file's basic metadata (name, path, size, timestamps, extension) so
+something useful is always visible — see *When MS Office is not installed*
+below.
+
+## When MS Office is not installed
+
+If the OS has no preview handler for the requested extension (typical when
+MS Office has never been installed on the machine), or a registered handler
+fails to load, the plugin renders a read-only text pane in place of the
+preview. It states clearly that no preview handler was found and lists what
+can still be read from the file system:
+
+- file name and full path
+- extension
+- size (human-readable and exact byte count)
+- created, modified and last-accessed timestamps
+
+This way users who install the plugin without Office still see *which*
+file the Lister is on and when it was last touched, plus instructions on
+how to enable real previews by installing Office.
 
 ## Plugin ↔ host wire protocol
 
@@ -172,16 +216,26 @@ of resize messages would otherwise saturate the pipe during a drag.
 **Plugin does not activate.** Verify in the TC Lister Plugins dialog that
 the plugin is loaded and that the extension appears in the *Detect string*.
 
-**Plugin activates but the window stays empty.** A Preview Handler is most
-likely not registered for the given type. Confirm in the registry:
+**Plugin shows the file-information fallback instead of a real preview.**
+No Preview Handler is registered for this file's extension on this
+machine. The most common reason is that MS Office is not installed.
+Confirm by inspecting the registry:
 
 ```
 HKCR\.docx\shellex\{8895b1c6-b41f-4c1c-a562-0d564250836f}
 ```
 
+If that key is missing, install Office (or whichever application supplies
+the handler for this file type).
+
+**Plugin activates but the pane stays completely blank.** The handler was
+created but rendered nothing. Enable diagnostic logging via the INI (see
+*Configuration*) to see where the load sequence stopped, and check Event
+Viewer for crashes of `TCOfficeViewHost.exe`.
+
 **TC crashes.** Should not happen thanks to process isolation. If it does,
-check Event Viewer for crashes of `TCOfficeViewHost.exe`. The most common cause
-is a 64/32-bit mismatch — for example a 64-bit Office where only the
+check Event Viewer for crashes of `TCOfficeViewHost.exe`. The most common
+cause is a 64/32-bit mismatch — for example a 64-bit Office where only the
 32-bit Preview Handler is registered. Try the other bitness of the plugin.
 
 ## License
