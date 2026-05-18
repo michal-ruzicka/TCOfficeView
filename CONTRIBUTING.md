@@ -52,8 +52,8 @@ hand.
   that the build touches)
 - `build\` — CMake out-of-source build trees (gitignored)
 - `dist\` — released ZIP bundles (gitignored)
-- Markdown files (README, CONTRIBUTING, CHANGELOG, LICENSE, TODO,
-  CLAUDE) live at the repo root and are bundled into every release ZIP.
+- Markdown files (README, CONTRIBUTING, CHANGELOG, LICENSE, CLAUDE)
+  live at the repo root and are bundled into every release ZIP.
 
 ## Architecture
 
@@ -93,7 +93,7 @@ the threading invariants, the `WM_SIZE` coalescing, the cross-process
 `PostMessage`-only worker → STA path that sidesteps
 `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` — live in [CLAUDE.md](CLAUDE.md).
 
-## Plugin ↔ Host Wire Protocol
+### Plugin ↔ Host Wire Protocol
 
 Text-based, UTF-16 LE, lines terminated by `\n`, transported over a
 message-mode named pipe.
@@ -118,7 +118,7 @@ the plugin coalesces `WM_SIZE` events through a 50 ms timer and a steady
 stream of resize messages would otherwise saturate the pipe during a
 drag.
 
-## Known Limitations
+### Known Limitations
 
 - **First-preview latency** – roughly 200–800 ms (cold start of the
   Office COM server). Subsequent previews are 100–300 ms.

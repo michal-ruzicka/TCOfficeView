@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] – 2026-05-18
+
+First public binary release.
+
 ### Added
 
 - GitHub Actions CI workflow (`.github/workflows/build.yml`) that builds
@@ -46,8 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Update documentation ([README.md](README.md), [CLAUDE.md](CLAUDE.md),
-  [TODO.md](TODO.md)).
+- Update documentation ([README.md](README.md), [CLAUDE.md](CLAUDE.md)).
 
 ### Fixed
 
@@ -103,7 +106,8 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
-[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/michal-ruzicka/TCOfficeView/releases/tag/v0.1.0
