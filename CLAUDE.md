@@ -58,17 +58,20 @@ deliberately removed that because:
 ## Repo layout (flat)
 
 ```
-TCOfficeView.cpp          - plugin DLL (TC Lister plugin entry points)
-TCOfficeView.def          - DLL exports
+TCOfficeView.cpp      - plugin DLL (TC Lister plugin entry points)
+TCOfficeView.def      - DLL exports
 listplug.h            - Lister plugin API (subset used here)
-TCOfficeViewHost.cpp     - host EXE (COM preview handler host)
+TCOfficeViewHost.cpp  - host EXE (COM preview handler host + fallback UI)
 app.manifest          - host EXE manifest (PerMonitorV2 DPI)
 pluginst.inf          - TC auto-installer metadata; canonical version source
-TCOfficeView.ini      - sample / system-wide config (logging toggle, etc.)
+TCOfficeView.ini      - sample / system-wide config (logging, fallback font)
 CMakeLists.txt        - builds TCOfficeView.wlx / .wlx64 and TCOfficeViewHost.exe
-build.cmd             - convenience driver: x86 + x64, copies to dist/,
-                        and packages dist into TCOfficeView.v<version>.zip
+build.cmd             - convenience driver: x86 + x64, stages everything,
+                        and packages it into dist/TCOfficeView.v<version>.zip
 README.md             - end-user / contributor docs
+CHANGELOG.md          - Keep-a-Changelog formatted release notes
+LICENSE.md            - Apache License 2.0 + copyright notice
+TODO.md               - working list of upcoming work
 CLAUDE.md             - this file
 ```
 
@@ -106,16 +109,53 @@ short timer to avoid stalling TC's UI on the pipe write.
   exceptions escape into COM.
 - **STA discipline in the host.** All COM calls (`CoCreateInstance`,
   `IPreviewHandler::*`) must happen on the STA thread. The pipe reader
-  runs on a worker thread and dispatches via `SendMessage` to a message-only
-  window on the STA thread.
+  runs on a worker thread and dispatches via `PostMessage` to a
+  message-only window on the STA thread. `SendMessage` would put the
+  STA into the input-synchronous state, where COM refuses outgoing calls
+  with `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` (0x8001010D) — the bug that
+  broke the first working build.
 - **Don't block in `WM_SIZE`** in the plugin. The DLL runs inside TC's UI
   thread; a blocking pipe write would stall the resize loop.
+- **Render in our process, not TC's.** The host creates its own child
+  HWND and `SetParent`s it into the plugin's child window inside TC.
+  Giving the preview handler our window (rather than TC's) keeps the
+  handler's internal `SetParent` calls local to the host process and
+  avoids cross-process win32k/COM deadlocks against TC's UI thread.
+- **Source files are UTF-8.** CMakeLists passes `/utf-8` to MSVC so
+  literals containing em-dashes / accented characters don't depend on
+  the system ANSI code page.
 
 ## Build prerequisites
 
-- Visual Studio 2022 Build Tools, workload: *Desktop development with C++*.
+- Visual Studio 2026 Build Tools, workload: *Desktop development with C++*.
 - CMake 3.20+.
 - No .NET SDK. No other toolchain.
+
+## Configuration & fallback UI
+
+Runtime settings live in `TCOfficeView.ini`. The host looks for it under
+`%APPDATA%\GHISLER\TCOfficeView.ini` first (per-user override) and falls
+back to `<plugin install dir>\TCOfficeView.ini`. The first file that
+exists wins entirely — no per-key merging. All values support
+environment-variable expansion (`%TEMP%`, `%LocalAppData%`, …).
+
+Sections currently honoured:
+
+- `[Logging] LogPath=` — empty disables logging; non-empty path enables
+  it. Missing parent directories are created on first write.
+- `[FallbackUI] FontFamily=` / `FontSize=` — font for the read-only
+  panel shown when no preview handler is usable for the file. Empty
+  family auto-picks Aptos Mono → Consolas → Cascadia Mono → Lucida
+  Console → Courier New. Font is DPI-aware (`GetDpiForWindow` +
+  `MulDiv`).
+
+The fallback panel is a child `EDIT` control inside `hwndRender`,
+created on any failure from `FindPreviewHandlerClsid` /
+`CoCreateInstance` / `Initialize*` / `QI IPreviewHandler` /
+`SetWindow` / `DoPreview`. `LoadHandlerSta` still returns `S_OK` to the
+plugin in that case — the file was "shown", just via the fallback. The
+panel is sized in `ResizeHandlerSta` and torn down in
+`UnloadHandlerSta`.
 
 ## Future work (not blocking)
 
@@ -125,3 +165,6 @@ short timer to avoid stalling TC's UI on the pipe write.
   could be wired through to the host.
 - Persistent host process pooling — currently one host per Lister session.
   Reuse via `ListLoadNextW` is implemented; cross-session pooling is not.
+- Full embedded mode instead of OLE preview (Word paged layout instead
+  of web view), per-file-type configurable. See `TODO.md`.
+- Project-level CI / GitHub release pipeline. See `TODO.md`.

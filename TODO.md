@@ -1,4 +1,6 @@
-- [ ] Describe system requirements in README.md.
+# TODO
+
+- [x] Update README.md to be better useable for users and developers.
 - [x] Add info page if MS Office is not available on the target system.
 - [x] Add some open source permissive license.
 - [x] Create standard Total Commander ZIP distribution archive.

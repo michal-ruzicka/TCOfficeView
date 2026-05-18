@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-05-18
+## [Unreleased]
+
+## [0.3.0] – 2026-05-18
 
 ### Added
 
@@ -22,7 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-picks the first installed font from a preference list: Aptos Mono
   → Consolas → Cascadia Mono → Lucida Console → Courier New.
 
-## [0.2.0] - 2026-05-15
+### Changed
+
+- Update documentation ([README.md](README.md), [CLAUDE.md](CLAUDE.md),
+  [TODO.md](TODO.md)).
+
+### Fixed
+
+- Non-ASCII characters in wide string literals (em-dashes, accented
+  characters) no longer display as mojibake in the fallback panel on
+  systems whose ANSI code page is not UTF-8. MSVC is now invoked with
+  `/utf-8` so source files are interpreted as UTF-8 regardless of the
+  system locale.
+
+## [0.2.0] – 2026-05-15
 
 ### Added
 
@@ -43,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compile-time kill-switch, but at run time logging is gated by the INI
   setting above.
 
-## [0.1.0] - 2026-05-15
+## [0.1.0] – 2026-05-15
 
 First working release.
 
