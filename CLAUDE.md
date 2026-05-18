@@ -67,7 +67,6 @@ README.md             - end-user docs (auto-installed into the ZIP)
 CONTRIBUTING.md       - developer docs (auto-installed into the ZIP)
 CHANGELOG.md          - Keep-a-Changelog formatted release notes
 LICENSE.md            - Apache License 2.0 + copyright notice
-TODO.md               - working list of upcoming work
 CLAUDE.md             - this file
 build.cmd             - convenience driver: x86 + x64, stages everything,
                         and packages it into dist/TCOfficeView.v<version>.zip
@@ -175,5 +174,5 @@ panel is sized in `ResizeHandlerSta` and torn down in
 - Persistent host process pooling — currently one host per Lister session.
   Reuse via `ListLoadNextW` is implemented; cross-session pooling is not.
 - Full embedded mode instead of OLE preview (Word paged layout instead
-  of web view), per-file-type configurable. See `TODO.md`.
-- Project-level CI / GitHub release pipeline. See `TODO.md`.
+  of web view), per-file-type configurable.
+- Release workflow automation (GitHub Actions triggered by `v*` tags).

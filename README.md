@@ -38,7 +38,7 @@ folder (for example `C:\Tools\TCOfficeView\`) and add `TCOfficeView.wlx`
 (32-bit TC) or `TCOfficeView.wlx64` (64-bit TC) under **Configuration →
 Options → Plugins → Lister plugins → Configure → Add**.
 
-## Verifying Releases
+### Verifying Releases
 
 Each release ZIP is accompanied by a detached GPG signature file
 (`TCOfficeView.vX.Y.Z.zip.asc`). Before installing, verify that the
@@ -58,7 +58,7 @@ There is no UI to configure at runtime — just press **F3** (or use Quick View
 [**Ctrl+Q**]) on any supported file. The preview tracks the Lister pane size and
 selecting a different file in the panel loads it into the same Lister session.
 
-## Supported Formats
+### Supported Formats
 
 Format support depends on which Windows Preview Handlers are registered
 on the machine. With Microsoft Office installed you typically get:
@@ -93,7 +93,7 @@ panel for that file instead of failing silently.
 > Windows Explorer's own preview pane is empty too, and the plugin falls
 > back to the information panel.
 
-## Configuration
+### Configuration
 
 Settings live in `TCOfficeView.ini`. The plugin reads it from two
 locations and uses the **first one that exists** — values are not merged
@@ -108,7 +108,7 @@ To customise, copy that file to `%APPDATA%\GHISLER\TCOfficeView.ini` and
 edit the copy. Environment variables (`%TEMP%`, `%LocalAppData%`,
 `%UserProfile%`, `%APPDATA%`, …) are expanded in any value.
 
-### Logging
+#### Logging
 
 Diagnostic logging is **off by default**. Turn it on by setting `LogPath`
 under `[Logging]` to a writable file. Missing parent directories are
@@ -121,7 +121,7 @@ LogPath=%LocalAppData%\TCOfficeView\host.log
 
 Leave the value empty (or comment it out) to disable logging.
 
-### Fallback Information Panel
+#### Fallback Information Panel
 
 Under `[FallbackUI]`:
 
@@ -141,7 +141,7 @@ FontFamily=Cascadia Code
 FontSize=13
 ```
 
-## When MS Office Is Not Installed
+### When MS Office Is Not Installed
 
 If the operating system has no Preview Handler for the file's extension — or a
 registered handler fails to load — the plugin renders a read-only text panel in
@@ -158,7 +158,7 @@ the plugin without Office still sees which file the Lister is on and
 when it was last touched, along with instructions on how to enable real
 previews.
 
-## Troubleshooting
+### Troubleshooting
 
 **Plugin does not activate.** Open **Configuration → Options → Plugins →
 Lister plugins → Configure** and verify TCOfficeView is loaded and the
