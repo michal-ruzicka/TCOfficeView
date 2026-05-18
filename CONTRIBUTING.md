@@ -33,6 +33,18 @@ under `src\` and packages the artifacts into
 described in *Installation*. The version is read from `src\pluginst.inf`
 as the single source of truth; bump it there before tagging a release.
 
+The same `build.cmd` is what the GitHub Actions CI workflow runs on every
+push and pull request. The workflow uploads the resulting ZIP as a
+downloadable artifact but does **not** publish GitHub Releases — that step
+is done locally after GPG-signing the artifact (see *Release process*
+below).
+
+All actions in the workflow are pinned to a full commit SHA (required by
+the repository's *Require actions to be pinned to a full-length commit SHA*
+policy). Dependabot is configured to open monthly PRs that bump those SHAs
+when upstream actions release new versions — do not update the SHAs by
+hand.
+
 ## Repo Layout
 
 - `src\` — C++ sources, INI/INF/manifest, `CMakeLists.txt`
@@ -117,6 +129,90 @@ drag.
   menu are not yet wired through to the host. Most preview handlers
   expose their own context menus inside the preview area, so this is
   rarely noticed in practice.
+
+## Signing Policy
+
+All commits merged into `main` must be signed. Tags `v*` must also be
+signed. The repository's branch and tag protection rules enforce this
+server-side — unsigned commits and tags are rejected on push.
+
+Two distinct signing mechanisms are in use:
+
+| What | Method | Key type |
+|------|--------|----------|
+| Git commits and annotated tags | SSH key signing | Your SSH key |
+| Release ZIP files | GPG detached signature | Separate GPG key |
+
+### Setting up SSH commit signing
+
+You can reuse the same SSH key you already use to authenticate to GitHub.
+
+**1. Register the key as a signing key on GitHub.**
+
+Go to **Settings → SSH and GPG keys → New signing key** and paste your
+public key. This is a separate entry from the authentication key, but
+both entries can use the same key material.
+
+**2. Configure Git for this repository.**
+
+```
+git config gpg.format ssh
+git config user.signingkey "~/.ssh/id_ed25519.pub"
+git config commit.gpgsign true
+```
+
+Replace `id_ed25519.pub` with your actual public key filename if
+different. Omitting `--global` scopes these settings to this repository
+only.
+
+**3. Verify.**
+
+```
+git commit --allow-empty -m "test signing"
+git log -1 --show-signature
+```
+
+Git should report `Good "git" signature` with your key fingerprint.
+
+The same `gpg.format = ssh` setting is picked up by `git tag -s`, so
+the release tagging step in *Release Process* below also uses your SSH
+key automatically — no separate GPG key is needed for tags.
+
+### GPG signing of release ZIPs
+
+The distributable ZIP is signed with a GPG key (not the SSH key) to
+produce a detached `.asc` signature that end users can verify without
+having to trust GitHub's infrastructure. The signing key fingerprint is
+`489C 5EC8 0FD6 2BE8 9E59  B4F7 19C1 3E8C E0F5 DB61` (available on
+<https://keys.openpgp.org/>). The exact signing steps are in the
+*Release Process* section below.
+
+## Release Process
+
+Releases are built and signed locally; no private key ever leaves the
+developer's machine.
+
+1. On a feature branch, bump `version=` in `src\pluginst.inf` and add a
+   `## [X.Y.Z] – YYYY-MM-DD` entry to `CHANGELOG.md`.
+2. Open a PR, get it reviewed, and merge into `main`.
+3. On `main`, tag and push:
+   ```
+   git fetch && git checkout main && git pull
+   git tag -s vX.Y.Z -m "Release X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+4. Run `build.cmd` locally to produce `dist\TCOfficeView.vX.Y.Z.zip`.
+5. GPG-sign the ZIP:
+   ```
+   gpg --detach-sign --armor dist\TCOfficeView.vX.Y.Z.zip
+   ```
+   This creates `dist\TCOfficeView.vX.Y.Z.zip.asc`.
+6. On the GitHub repository page, go to **Releases → Draft a new release**,
+   select the `vX.Y.Z` tag, paste the CHANGELOG entry as the description,
+   and attach both files (`.zip` and `.zip.asc`).
+
+The CI workflow also produces the ZIP as a downloadable Actions artifact,
+but that copy is unsigned and is intended for testing PRs only.
 
 ## License
 

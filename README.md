@@ -1,5 +1,7 @@
 # TCOfficeView: a Total Commander Lister Plugin that Previews Microsoft Office Documents
 
+[![Build](https://github.com/michal-ruzicka/TCOfficeView/actions/workflows/build.yml/badge.svg)](https://github.com/michal-ruzicka/TCOfficeView/actions/workflows/build.yml)
+
 **A [Total Commander](https://www.ghisler.com/) Lister plugin that previews
 Microsoft Office documents — Word, Excel, PowerPoint and more — directly in TC's
 F3 / Quick View pane.** It hosts the Windows Preview Handlers that an MS Office
@@ -35,6 +37,20 @@ If you prefer to install manually, unzip the archive into a persistent
 folder (for example `C:\Tools\TCOfficeView\`) and add `TCOfficeView.wlx`
 (32-bit TC) or `TCOfficeView.wlx64` (64-bit TC) under **Configuration →
 Options → Plugins → Lister plugins → Configure → Add**.
+
+## Verifying Releases
+
+Each release ZIP is accompanied by a detached GPG signature file
+(`TCOfficeView.vX.Y.Z.zip.asc`). Before installing, verify that the
+archive has not been tampered with:
+
+```
+gpg --keyserver keys.openpgp.org --recv-keys 489C5EC80FD62BE89E59B4F719C13E8CE0F5DB61
+gpg --verify TCOfficeView.vX.Y.Z.zip.asc TCOfficeView.vX.Y.Z.zip
+```
+
+GPG should report `Good signature from "Michal Růžička <ruzicka.mich@gmail.com>"`.
+The full fingerprint of the signing key is `489C 5EC8 0FD6 2BE8 9E59  B4F7 19C1 3E8C E0F5 DB61`.
 
 ## Usage
 

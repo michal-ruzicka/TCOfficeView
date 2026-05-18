@@ -24,7 +24,7 @@ REM     TCOfficeView.v<version>.zip     (distributable bundle)
 REM     ...                             (any older versioned ZIPs are kept)
 REM
 REM Prerequisites:
-REM   - Visual Studio 2022 Build Tools, workload "Desktop development with C++"
+REM   - Visual Studio 2026 Build Tools, workload "Desktop development with C++"
 REM   - CMake 3.20+
 REM   - PowerShell 5.1+ (ships with Windows; used for Compress-Archive)
 REM ===========================================================================
