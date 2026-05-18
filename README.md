@@ -1,5 +1,7 @@
 # TCOfficeView: a Total Commander Lister Plugin that Previews Microsoft Office Documents
 
+[![Build](https://github.com/michal-ruzicka/TCOfficeView/actions/workflows/build.yml/badge.svg)](https://github.com/michal-ruzicka/TCOfficeView/actions/workflows/build.yml)
+
 **A [Total Commander](https://www.ghisler.com/) Lister plugin that previews
 Microsoft Office documents — Word, Excel, PowerPoint and more — directly in TC's
 F3 / Quick View pane.** It hosts the Windows Preview Handlers that an MS Office

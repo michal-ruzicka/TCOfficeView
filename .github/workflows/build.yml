@@ -1,0 +1,44 @@
+name: Build
+
+# Runs on every push (all branches) and on every pull request.
+# Purpose: verify that both bitnesses compile cleanly.
+# Releases are NOT published here — artifacts are signed locally and
+# uploaded to GitHub Releases by hand (see CONTRIBUTING.md).
+on:
+  push:
+  pull_request:
+
+# Cancel any in-progress run for the same ref so a fast-follow push does
+# not queue up behind a stale one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Set up the MSVC compiler environment (cl.exe, link.exe, …) for the
+      # latest Visual Studio version present on the runner.
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+
+      # build.cmd drives CMake for both x86 and x64, stages the artifacts,
+      # and creates dist\TCOfficeView.v<version>.zip.
+      - name: Build (x86 + x64)
+        shell: cmd
+        run: build.cmd
+
+      # Make the distributable ZIP downloadable from the Actions run page.
+      # It is not published as a GitHub Release — that step is done locally
+      # after GPG-signing the artifact.
+      - name: Upload distributable ZIP
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TCOfficeView-dist
+          path: dist\*.zip
+          if-no-files-found: error
+          retention-days: 90

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions CI workflow (`.github/workflows/build.yml`) that builds
+  both bitnesses on every push and pull request using `build.cmd` and
+  uploads the resulting ZIP as a downloadable workflow artifact. Releases
+  are still published manually after local GPG signing.
+- Build status badge in `README.md`.
+
 ### Changed
 
 - Repository layout reorganised: all C++ sources, INI/INF/manifest files
@@ -16,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Contributor docs split out of `README.md` into a dedicated
   [`CONTRIBUTING.md`](CONTRIBUTING.md) at the repo root. The README now
   focuses on end-user installation, usage and configuration.
+- `CONTRIBUTING.md` now includes a *Release Process* section describing
+  the local-build + GPG-sign + manual GitHub upload workflow.
 
 ## [0.3.0] – 2026-05-18
 

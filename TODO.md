@@ -13,11 +13,13 @@
     - [x] Including commits signing policy.
         - `main` protected and always shippable.
         - Changes through feature branches (`feature/<short-desc>` or simply `<topic>`), PR → review → merge into `main`. Tags `vX.Y.Z` (annotated, signed) on commits on `main`.
-  - [ ] Setup standard build and release process with GitHub actions on tags on `main` branch.
-    - [ ] Include badge in README.md.
-    - [ ] Including artifacts signing policy:
+  - [x] Setup CI build with GitHub Actions (build verification on every push / PR).
+    - [x] Include badge in README.md.
+  - [x] Setup release workflow with GitHub Actions triggered by `v*` tags on `main`.
+    - [x] Including artifacts signing policy:
       - Locally: bump `src/pluginst.inf` (`version=`) + entry in `CHANGELOG.md` → feature branch → PR → review → merge into `main`.
       - `git fetch && git checkout main && git pull && git tag -s vX.Y.Z -m "Release X.Y.Z" && git push origin vX.Y.Z`.
+      - GPG-sign the ZIP locally (`gpg --detach-sign --armor`) and attach both files to the GitHub Release by hand.
   - [ ] Describe the policy in README.md.
     - Commits in `main` have to be signed.
       - How to setup commits signing with SSH.

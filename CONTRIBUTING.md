@@ -33,6 +33,18 @@ under `src\` and packages the artifacts into
 described in *Installation*. The version is read from `src\pluginst.inf`
 as the single source of truth; bump it there before tagging a release.
 
+The same `build.cmd` is what the GitHub Actions CI workflow runs on every
+push and pull request. The workflow uploads the resulting ZIP as a
+downloadable artifact but does **not** publish GitHub Releases — that step
+is done locally after GPG-signing the artifact (see *Release process*
+below).
+
+All actions in the workflow are pinned to a full commit SHA (required by
+the repository's *Require actions to be pinned to a full-length commit SHA*
+policy). Dependabot is configured to open monthly PRs that bump those SHAs
+when upstream actions release new versions — do not update the SHAs by
+hand.
+
 ## Repo Layout
 
 - `src\` — C++ sources, INI/INF/manifest, `CMakeLists.txt`
@@ -117,6 +129,33 @@ drag.
   menu are not yet wired through to the host. Most preview handlers
   expose their own context menus inside the preview area, so this is
   rarely noticed in practice.
+
+## Release Process
+
+Releases are built and signed locally; no private key ever leaves the
+developer's machine.
+
+1. On a feature branch, bump `version=` in `src\pluginst.inf` and add a
+   `## [X.Y.Z] – YYYY-MM-DD` entry to `CHANGELOG.md`.
+2. Open a PR, get it reviewed, and merge into `main`.
+3. On `main`, tag and push:
+   ```
+   git fetch && git checkout main && git pull
+   git tag -s vX.Y.Z -m "Release X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+4. Run `build.cmd` locally to produce `dist\TCOfficeView.vX.Y.Z.zip`.
+5. GPG-sign the ZIP:
+   ```
+   gpg --detach-sign --armor dist\TCOfficeView.vX.Y.Z.zip
+   ```
+   This creates `dist\TCOfficeView.vX.Y.Z.zip.asc`.
+6. On the GitHub repository page, go to **Releases → Draft a new release**,
+   select the `vX.Y.Z` tag, paste the CHANGELOG entry as the description,
+   and attach both files (`.zip` and `.zip.asc`).
+
+The CI workflow also produces the ZIP as a downloadable Actions artifact,
+but that copy is unsigned and is intended for testing PRs only.
 
 ## License
 
