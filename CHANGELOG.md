@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Repository layout reorganised: all C++ sources, INI/INF/manifest files
+  and `CMakeLists.txt` moved under `src/`. The repo root now holds only
+  the Markdown documentation and `build.cmd`. The auto-install ZIP
+  layout produced by `build.cmd` to `dist/` is unchanged.
+- Contributor docs split out of `README.md` into a dedicated
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) at the repo root. The README now
+  focuses on end-user installation, usage and configuration.
+
 ## [0.3.0] – 2026-05-18
 
 ### Added

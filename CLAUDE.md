@@ -55,24 +55,33 @@ deliberately removed that because:
 - `IPreviewHandler` is a C-first COM API. Hand-rolled `[ComImport]` interop in
   C# is more boilerplate than the equivalent C++ interface declarations.
 
-## Repo layout (flat)
+## Repo layout
+
+Markdown documentation and the build driver live at the repo root; all
+build inputs (C++ sources, INI/INF/manifest, CMakeLists) live under
+`src/`. `build.cmd` is the only file that crosses the boundary — it
+reads from `src/` and writes to `build/` and `dist/` (both ignored).
 
 ```
-TCOfficeView.cpp      - plugin DLL (TC Lister plugin entry points)
-TCOfficeView.def      - DLL exports
-listplug.h            - Lister plugin API (subset used here)
-TCOfficeViewHost.cpp  - host EXE (COM preview handler host + fallback UI)
-app.manifest          - host EXE manifest (PerMonitorV2 DPI)
-pluginst.inf          - TC auto-installer metadata; canonical version source
-TCOfficeView.ini      - sample / system-wide config (logging, fallback font)
-CMakeLists.txt        - builds TCOfficeView.wlx / .wlx64 and TCOfficeViewHost.exe
-build.cmd             - convenience driver: x86 + x64, stages everything,
-                        and packages it into dist/TCOfficeView.v<version>.zip
-README.md             - end-user / contributor docs
+README.md             - end-user docs (auto-installed into the ZIP)
+CONTRIBUTING.md       - developer docs (auto-installed into the ZIP)
 CHANGELOG.md          - Keep-a-Changelog formatted release notes
 LICENSE.md            - Apache License 2.0 + copyright notice
 TODO.md               - working list of upcoming work
 CLAUDE.md             - this file
+build.cmd             - convenience driver: x86 + x64, stages everything,
+                        and packages it into dist/TCOfficeView.v<version>.zip
+src/
+  CMakeLists.txt      - builds TCOfficeView.wlx / .wlx64 and TCOfficeViewHost.exe
+  TCOfficeView.cpp    - plugin DLL (TC Lister plugin entry points)
+  TCOfficeView.def    - DLL exports
+  listplug.h          - Lister plugin API (subset used here)
+  TCOfficeViewHost.cpp - host EXE (COM preview handler host + fallback UI)
+  app.manifest        - host EXE manifest (PerMonitorV2 DPI)
+  pluginst.inf        - TC auto-installer metadata; canonical version source
+  TCOfficeView.ini    - sample / system-wide config (logging, fallback font)
+build/                - CMake out-of-source build trees (gitignored)
+dist/                 - released TCOfficeView.v<version>.zip files (gitignored)
 ```
 
 ## Pipe protocol

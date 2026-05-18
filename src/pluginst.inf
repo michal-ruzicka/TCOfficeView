@@ -3,4 +3,4 @@ type=wlx
 file=TCOfficeView.wlx
 description=Preview MS Office documents (DOCX, XLSX, PPTX, RTF, VSDX, MSG, ...) via the Windows Preview Handlers registered by Office. Hosts the handlers out-of-process for stability and STA correctness.
 defaultdir=TCOfficeView
-version=0.3.0
+version=0.4.0-devel
