@@ -21,17 +21,19 @@ instead of an empty preview, so it stays useful in any environment.
 **Project page:** <https://github.com/michal-ruzicka/TCOfficeView> — source
 code, releases and issue tracker.
 
+**Binary releases:** <https://github.com/michal-ruzicka/TCOfficeView/releases>
+
 ---
 
 ## Installation
 
 The recommended way is the **Total Commander auto-installer:**
 
-1. Download `TCOfficeView.vX.Y.Z.zip` from the latest release.
-2. In Total Commander, navigate to the ZIP file and press **Enter**.
+1. **Download** `TCOfficeView.vX.Y.Z.zip` from the [**latest release**](https://github.com/michal-ruzicka/TCOfficeView/releases).
+2. In Total Commander, **navigate to the ZIP** file and press **Enter**.
 3. TC detects the bundled `pluginst.inf` and asks whether to install the
-   plugin — confirm.
-4. Press **F3** on a `.docx` / `.xlsx` / `.pptx` file to verify.
+   plugin — **confirm**.
+4. Press **F3** or **Ctrl+Q** on a `.docx` / `.xlsx` / `.pptx` file to verify.
 
 If you prefer to install manually, unzip the archive into a persistent
 folder (for example `C:\Tools\TCOfficeView\`) and add `TCOfficeView.wlx`
