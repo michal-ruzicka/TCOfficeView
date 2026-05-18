@@ -9,8 +9,22 @@
     - [x] User specific ini file in `%AppData%\GHISLER` TC config directory that has precedence over the global config.
   - [x] Make here logging optional (to not overfill our expensive disks) with configuration of log path.
 - [x] Create private repository on GitHub.
-  - [ ] Setup standard development process – merge requests from `develop` branch to protected `main` branch.
+  - [x] Setup standard development process:
+    - [x] Including commits signing policy.
+        - `main` protected and always shippable.
+        - Changes through feature branches (`feature/<short-desc>` or simply `<topic>`), PR → review → merge into `main`. Tags `vX.Y.Z` (annotated, signed) on commits on `main`.
   - [ ] Setup standard build and release process with GitHub actions on tags on `main` branch.
+    - [ ] Include badge in README.md.
+    - [ ] Including artifacts signing policy:
+      - Locally: bump `src/pluginst.inf` (`version=`) + entry in `CHANGELOG.md` → feature branch → PR → review → merge into `main`.
+      - `git fetch && git checkout main && git pull && git tag -s vX.Y.Z -m "Release X.Y.Z" && git push origin vX.Y.Z`.
+  - [ ] Describe the policy in README.md.
+    - Commits in `main` have to be signed.
+      - How to setup commits signing with SSH.
+    - Tags `v*` have to be signed.
+      - How to setup release ZIPs signing with GPG.
+    - Repo owner commit SSH signing key is *xxx*.
+    - Repo owner release GPG signing key is *yyy*.
   - [ ] Make the repo public.
 - [ ] Add full embedded mode instead of OLE preview (to allow in Word paged layout instead of web view mode).
   - [ ] Add configuration per file type (Word/Excel/PowerPoint) to use quick of full mode.
