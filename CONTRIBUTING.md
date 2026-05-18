@@ -130,6 +130,63 @@ drag.
   expose their own context menus inside the preview area, so this is
   rarely noticed in practice.
 
+## Signing Policy
+
+All commits merged into `main` must be signed. Tags `v*` must also be
+signed. The repository's branch and tag protection rules enforce this
+server-side — unsigned commits and tags are rejected on push.
+
+Two distinct signing mechanisms are in use:
+
+| What | Method | Key type |
+|------|--------|----------|
+| Git commits and annotated tags | SSH key signing | Your SSH key |
+| Release ZIP files | GPG detached signature | Separate GPG key |
+
+### Setting up SSH commit signing
+
+You can reuse the same SSH key you already use to authenticate to GitHub.
+
+**1. Register the key as a signing key on GitHub.**
+
+Go to **Settings → SSH and GPG keys → New signing key** and paste your
+public key. This is a separate entry from the authentication key, but
+both entries can use the same key material.
+
+**2. Configure Git for this repository.**
+
+```
+git config gpg.format ssh
+git config user.signingkey "~/.ssh/id_ed25519.pub"
+git config commit.gpgsign true
+```
+
+Replace `id_ed25519.pub` with your actual public key filename if
+different. Omitting `--global` scopes these settings to this repository
+only.
+
+**3. Verify.**
+
+```
+git commit --allow-empty -m "test signing"
+git log -1 --show-signature
+```
+
+Git should report `Good "git" signature` with your key fingerprint.
+
+The same `gpg.format = ssh` setting is picked up by `git tag -s`, so
+the release tagging step in *Release Process* below also uses your SSH
+key automatically — no separate GPG key is needed for tags.
+
+### GPG signing of release ZIPs
+
+The distributable ZIP is signed with a GPG key (not the SSH key) to
+produce a detached `.asc` signature that end users can verify without
+having to trust GitHub's infrastructure. The signing key fingerprint is
+`489C 5EC8 0FD6 2BE8 9E59  B4F7 19C1 3E8C E0F5 DB61` (available on
+<https://keys.openpgp.org/>). The exact signing steps are in the
+*Release Process* section below.
+
 ## Release Process
 
 Releases are built and signed locally; no private key ever leaves the

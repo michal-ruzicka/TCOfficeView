@@ -38,6 +38,20 @@ folder (for example `C:\Tools\TCOfficeView\`) and add `TCOfficeView.wlx`
 (32-bit TC) or `TCOfficeView.wlx64` (64-bit TC) under **Configuration →
 Options → Plugins → Lister plugins → Configure → Add**.
 
+## Verifying Releases
+
+Each release ZIP is accompanied by a detached GPG signature file
+(`TCOfficeView.vX.Y.Z.zip.asc`). Before installing, verify that the
+archive has not been tampered with:
+
+```
+gpg --keyserver keys.openpgp.org --recv-keys 489C5EC80FD62BE89E59B4F719C13E8CE0F5DB61
+gpg --verify TCOfficeView.vX.Y.Z.zip.asc TCOfficeView.vX.Y.Z.zip
+```
+
+GPG should report `Good signature from "Michal Růžička <ruzicka.mich@gmail.com>"`.
+The full fingerprint of the signing key is `489C 5EC8 0FD6 2BE8 9E59  B4F7 19C1 3E8C E0F5 DB61`.
+
 ## Usage
 
 There is no UI to configure at runtime — just press **F3** (or use Quick View
