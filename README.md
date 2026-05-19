@@ -77,17 +77,16 @@ The plugin advertises support for the union of these extensions. If a
 specific handler is missing, the plugin shows the fallback information
 panel for that file instead of failing silently.
 
-> **Word documents render in Web Layout view.** All Office Preview
-> Handlers (Word, Excel, PowerPoint) use a simplified embedded rendering
-> pipeline optimised for speed and stability inside a host window, not
-> the full editing UI. For Word this means a flowing Web Layout without
-> page breaks, headers or footers; Excel shows a simplified grid;
-> PowerPoint shows static slides without transitions. The plugin invokes
-> the handler the same way Windows Explorer (Alt+R) does — the rendering 
-> mode is hard-wired by Microsoft's handler implementation and there is no 
-> API on `IPreviewHandler` to change it. A future “full embedded” mode that
-> would drive a hidden Word/Excel/PowerPoint instance via OLE Automation
-> instead of the Preview Handler is a possible future development.
+> **Word documents render in Web Layout view by default.** All Office
+> Preview Handlers (Word, Excel, PowerPoint) use a simplified embedded
+> rendering pipeline optimised for speed and stability inside a host
+> window, not the full editing UI. For Word this means a flowing Web
+> Layout without page breaks, headers or footers; Excel shows a
+> simplified grid; PowerPoint shows static slides without transitions.
+> **An opt-in Full mode** — which drives a real Word instance via OLE
+> Automation and renders documents in Print Layout view (with proper
+> pagination, headers and footers) — is available for Word; see
+> [Application Render Mode](#application-render-mode) below.
 
 > **MSG and VSDX caveat.** Recent Office / Outlook installs sometimes do
 > not register the shell Preview Handler for `.msg` or `.vsdx` — New
@@ -142,6 +141,56 @@ Under `[FallbackUI]`:
 FontFamily=Cascadia Code
 FontSize=13
 ```
+
+#### Application Render Mode
+
+By default all previews use the **quick mode** — the Windows Preview
+Handler that Office registers. This is fast (~200–800 ms cold start),
+memory-light (~30–80 MB) and stable, but the rendering pipeline is
+simplified (Web Layout for Word, no transitions for PowerPoint, etc.).
+
+Setting an application to `full` instead drives a real Office instance
+via OLE Automation and embeds its main window into the Lister pane.
+**Currently only `Word=full` is implemented**; the `Excel` and
+`PowerPoint` keys are reserved and behave as `quick`.
+
+```ini
+[Mode]
+Word=full
+;Excel=quick
+;PowerPoint=quick
+```
+
+What full mode does in the preview pane:
+
+- Switches the document to **Print Layout** view (page boundaries,
+  headers, footers, page numbers).
+- **Zooms to page width** (`wdPageFitBestFit`), re-fitting automatically
+  when the Lister pane is resized — handy in the narrow Quick View
+  [Ctrl+Q] pane.
+- Hides the rulers.
+- Enforces **read-only** via `Document.Protect(wdAllowOnlyReading)` on
+  top of the `ReadOnly=True` open flag, so typing in the document is
+  blocked and Ctrl+S has nothing to save.
+
+Full mode tradeoffs to be aware of:
+
+- **Cold start ~2–4 s** the first time a Word document is previewed in
+  a Lister session. Subsequent Word documents in the same session reuse
+  the running Word instance and load in ~0.5–1 s.
+- **Memory ~100–300 MB** per running Word instance.
+- **Requires a full Microsoft Office installation** (not just Office
+  Viewer, and not LibreOffice — only Word's COM server is supported).
+- **Falls back to quick mode** on any failure (Office missing, COM
+  activation refused, document corrupted, …), so you always get
+  *some* preview.
+- **Does not modify any global Word setting.** The plugin only touches
+  state scoped to the active window, view or document — never
+  `Application`-level properties like the status-bar visibility or
+  the ribbon state, because Office would persist those into your
+  user profile and change how your standalone Word starts up.
+  Concretely this means the Word ribbon stays visible in the preview;
+  the cost of hiding it would be hijacking your global Word settings.
 
 ### When MS Office Is Not Installed
 

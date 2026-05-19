@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in **full render mode** for Word documents, configured per
+  application under a new `[Mode]` INI section. When `Mode/Word=full`
+  is set, the plugin drives a Word.Application instance via OLE
+  Automation and reparents its main window into the Lister pane,
+  giving Print Layout rendering (proper pagination, headers and
+  footers) instead of the simplified Web Layout produced by the
+  Preview Handler. Cold start is slower (~2–4 s) and memory use is
+  higher (~100–300 MB), so the default remains `quick`. On any
+  failure (missing Office, protected document, COM activation
+  refused, …) the plugin transparently falls back to quick mode.
+- Per-document preview tweaks applied in full mode:
+  - `ActiveWindow.View.Type = wdPrintView` — Print Layout view.
+  - `ActiveWindow.View.Zoom.PageFit = wdPageFitBestFit` — zoom is
+    fitted to the page width and re-fits automatically when the
+    Lister pane is resized (important for the narrow Quick View
+    [Ctrl+Q] pane).
+  - `ActiveWindow.DisplayRulers = False` — rulers hidden.
+  - `Document.Protect(wdAllowOnlyReading)` — read-only enforcement
+    on top of the `ReadOnly=True` open flag, so typing in the
+    document is blocked and Ctrl+S has nothing to save.
+- INI keys `[Mode] Excel` and `[Mode] PowerPoint` are reserved (also
+  defaulting to `quick`); both currently behave as `quick` regardless
+  of the configured value — full-mode handlers for them are planned.
+
+### Notes
+
+- Full mode deliberately changes **no Application-level Word setting**
+  (status bar, ribbon state, default zoom, …). Office persists those
+  to the user's profile on Quit, so changing them in our preview
+  process would leak into the user's standalone Word. Only window-,
+  view- and document-scoped settings are touched.
+- Modern Microsoft 365 Word no longer exposes `Application.Hwnd`
+  through IDispatch. When it returns `DISP_E_UNKNOWNNAME` the plugin
+  falls back to `EnumWindows` looking for an `OpusApp` window whose
+  title contains the document filename.
+
 ## [1.0.0] – 2026-05-18
 
 First public binary release.

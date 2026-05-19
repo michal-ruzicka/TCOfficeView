@@ -116,12 +116,13 @@ short timer to avoid stalling TC's UI on the pipe write.
   are checked explicitly and turned into `ERR` responses; do not let C++
   exceptions escape into COM.
 - **STA discipline in the host.** All COM calls (`CoCreateInstance`,
-  `IPreviewHandler::*`) must happen on the STA thread. The pipe reader
-  runs on a worker thread and dispatches via `PostMessage` to a
-  message-only window on the STA thread. `SendMessage` would put the
-  STA into the input-synchronous state, where COM refuses outgoing calls
-  with `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` (0x8001010D) — the bug that
-  broke the first working build.
+  `IPreviewHandler::*`, `IDispatch::Invoke` on Word.Application) must
+  happen on the STA thread. The pipe reader runs on a worker thread and
+  dispatches via `PostMessage` to a message-only window on the STA
+  thread. `SendMessage` would put the STA into the input-synchronous
+  state, where COM refuses outgoing calls with
+  `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` (0x8001010D) — the bug that broke
+  the first working build.
 - **Don't block in `WM_SIZE`** in the plugin. The DLL runs inside TC's UI
   thread; a blocking pipe write would stall the resize loop.
 - **Render in our process, not TC's.** The host creates its own child
@@ -156,6 +157,10 @@ Sections currently honoured:
   family auto-picks Aptos Mono → Consolas → Cascadia Mono → Lucida
   Console → Courier New. Font is DPI-aware (`GetDpiForWindow` +
   `MulDiv`).
+- `[Mode] Word=` / `Excel=` / `PowerPoint=` — `quick` (default) selects
+  the Preview Handler path; `full` selects OLE Automation path. Only
+  `Word=full` is implemented; Excel/PowerPoint keys are accepted but
+  currently behave as `quick`.
 
 The fallback panel is a child `EDIT` control inside `hwndRender`,
 created on any failure from `FindPreviewHandlerClsid` /
@@ -165,6 +170,71 @@ plugin in that case — the file was "shown", just via the fallback. The
 panel is sized in `ResizeHandlerSta` and torn down in
 `UnloadHandlerSta`.
 
+## Mode dispatch (quick vs full)
+
+`LoadFileSta` is the top-level LOAD entry point. It classifies the file by
+extension into `AppKind { Other, Word, Excel, PowerPoint }`, looks up the
+matching `Mode` from `[Mode]`, and dispatches:
+
+- `Mode::Full` + `AppKind::Word` → `LoadWordFullSta`. On any failure it
+  silently falls back to the quick path (so the user always gets *some*
+  preview, even if Word is broken or missing).
+- Everything else → `LoadHandlerSta` (the original preview-handler path).
+
+Full-mode Word uses **OLE Automation via raw `IDispatch`** — no type
+library `#import`, no MFC. The thin helpers `DispGetId`, `DispCall`,
+`DispGetProperty`, `DispPutBool`, `DispPutI4`, `DispGetDispatchProperty`,
+`DispGetHwndProperty` wrap the `GetIDsOfNames` + `Invoke` dance.
+Word.Application is created on the first full-mode LOAD and *kept alive*
+across subsequent LOADs in the same session (matching the persistence of
+the preview handler). On mode switches (Word doc → non-Word file) we
+detach Word's window from `hwndRender` but keep the process around for
+possible reuse. On CLOSE we `Application.Quit` and release.
+
+### Embedding Word's window
+
+Word does not materialise its main HWND until `Application.Visible = True`.
+The sequence is therefore:
+
+1. `CoCreateInstance(Word.Application, IID_IDispatch)` — process is up,
+   but no window exists yet.
+2. `DisplayAlerts = wdAlertsNone`, `Visible = False`.
+3. `Documents.Open(FileName, ConfirmConversions=False, ReadOnly=True,
+   AddToRecentFiles=False)`. IDispatch positional args are passed in
+   **reverse order**; we deliberately stop at the first four parameters
+   instead of trying to skip ahead to `Visible` (param 12), which would
+   require named-arg invocation.
+4. `Visible = True` — Word's main window now exists. There is an
+   unavoidable brief on-screen flash here.
+5. Locate the HWND. **`Application.Hwnd` is gone in modern Microsoft 365**
+   (`GetIDsOfNames` returns `DISP_E_UNKNOWNNAME`). We try the property
+   once for older Office, then fall back to `EnumWindows` looking for the
+   `OpusApp` class, filtered by a window-title substring (the document
+   filename) to disambiguate from any pre-existing Word instance the user
+   may have running.
+6. `SetParent` into `hwndRender`, strip
+   `WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_BORDER|WS_POPUP|...`, add
+   `WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN`, `SetWindowPos` with
+   `SWP_FRAMECHANGED`.
+
+### Per-document preview tweaks
+
+After embedding, `ConfigureWordForPreviewSta` applies:
+
+- `ActiveWindow.View.Type = wdPrintView` (= 3) — Print Layout.
+- `ActiveWindow.View.Zoom.PageFit = wdPageFitBestFit` (= 2) — page-width
+  zoom that re-fits on window resize.
+- `ActiveWindow.DisplayRulers = False`.
+- `Document.Protect(wdAllowOnlyReading)` — runtime read-only on top of
+  the `ReadOnly=True` open flag.
+
+**Strict rule: we touch no `Application`-level Word setting.** Office
+persists Application properties (status bar, ribbon state, default
+zoom, recent files, …) into the user's profile on Quit, so changing
+them here would silently rewrite the user's standalone-Word
+preferences. Only window-, view- and document-scoped properties are in
+scope.
+
 ## Future work (not blocking)
 
 - Prefer `IInitializeWithStream` over `IInitializeWithFile` where supported;
@@ -173,6 +243,8 @@ panel is sized in `ResizeHandlerSta` and torn down in
   could be wired through to the host.
 - Persistent host process pooling — currently one host per Lister session.
   Reuse via `ListLoadNextW` is implemented; cross-session pooling is not.
-- Full embedded mode instead of OLE preview (Word paged layout instead
-  of web view), per-file-type configurable.
+- Full embedded mode for Excel and PowerPoint via OLE Automation
+  (analogous to the existing Word path). PowerPoint cannot be made
+  invisible, so its embedding will need a different approach (start
+  with the window off-screen, then reparent).
 - Release workflow automation (GitHub Actions triggered by `v*` tags).

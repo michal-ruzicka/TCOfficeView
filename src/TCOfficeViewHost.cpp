@@ -44,10 +44,12 @@
 #include <shlobj.h>           // SHCreateDirectoryExW
 #include <propsys.h>          // IInitializeWithFile, IInitializeWithStream
 #include <objbase.h>
+#include <oleauto.h>          // IDispatch helpers: SysAllocString, VARIANT, ...
 #include <stdio.h>
 #include <string>
 
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -64,9 +66,20 @@
 // %LocalAppData%). See the shipped sample INI for the full key reference.
 // ---------------------------------------------------------------------------
 
+// Per-application render mode. "Quick" hosts the Windows Preview Handler
+// registered by Office (fast, low memory, web-layout rendering only).
+// "Full" drives a hidden Word/Excel/PowerPoint instance via OLE Automation
+// and reparents its main window into our render pane (slower, higher
+// memory, but gives the full editing-mode rendering — for Word that means
+// the page layout with headers, footers and page breaks).
+enum class Mode { Quick, Full };
+
 static std::wstring g_logPath;       // empty → diagnostic logging is disabled
 static std::wstring g_fontFamily;    // empty → auto-pick from a fallback list
 static int          g_fontSize = 12;
+static Mode         g_modeWord       = Mode::Quick;
+static Mode         g_modeExcel      = Mode::Quick;
+static Mode         g_modePowerPoint = Mode::Quick;
 
 static std::wstring ExpandEnv(LPCWSTR s)
 {
@@ -107,6 +120,17 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
                                        12, iniPath.c_str());
     if (g_fontSize < 6)  g_fontSize = 6;     // clamp to a sane range
     if (g_fontSize > 72) g_fontSize = 72;
+
+    auto readMode = [&buf, &iniPath](LPCWSTR key, Mode dflt) -> Mode {
+        GetPrivateProfileStringW(L"Mode", key, L"",
+                                 buf, ARRAYSIZE(buf), iniPath.c_str());
+        if (_wcsicmp(buf, L"full")  == 0) return Mode::Full;
+        if (_wcsicmp(buf, L"quick") == 0) return Mode::Quick;
+        return dflt;                          // empty or invalid → default
+    };
+    g_modeWord       = readMode(L"Word",       Mode::Quick);
+    g_modeExcel      = readMode(L"Excel",      Mode::Quick);
+    g_modePowerPoint = readMode(L"PowerPoint", Mode::Quick);
     return true;
 }
 
@@ -216,6 +240,13 @@ struct HostState
     HANDLE              hPipe           = INVALID_HANDLE_VALUE;
     IUnknown*           pHandlerUnk     = nullptr;        // raw COM object
     IPreviewHandler*    pHandler        = nullptr;        // queried IPreviewHandler view
+
+    // Full-mode (OLE Automation) state. Currently only Word is wired up.
+    // A non-null pWordApp means the Word.Application instance is alive
+    // and is reused across LOAD commands within the same Lister session.
+    IDispatch*          pWordApp        = nullptr;
+    IDispatch*          pWordDoc        = nullptr;
+    HWND                hwndWordApp     = nullptr;        // Word main window reparented into hwndRender
 };
 
 static HostState g_state;
@@ -622,6 +653,478 @@ static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
 }
 
 // ---------------------------------------------------------------------------
+// Application dispatch (extension → app → mode)
+// ---------------------------------------------------------------------------
+
+enum class AppKind { Other, Word, Excel, PowerPoint };
+
+static AppKind ClassifyByExtension(LPCWSTR path)
+{
+    LPCWSTR dot = wcsrchr(path, L'.');
+    if (!dot || !dot[1]) return AppKind::Other;
+    // Compare case-insensitively against the known extensions.
+    struct Entry { const wchar_t* ext; AppKind app; };
+    static const Entry kTable[] = {
+        { L".doc",  AppKind::Word },       { L".docx", AppKind::Word },
+        { L".docm", AppKind::Word },       { L".rtf",  AppKind::Word },
+        { L".xls",  AppKind::Excel },      { L".xlsx", AppKind::Excel },
+        { L".xlsm", AppKind::Excel },      { L".xlsb", AppKind::Excel },
+        { L".ppt",  AppKind::PowerPoint }, { L".pptx", AppKind::PowerPoint },
+        { L".pptm", AppKind::PowerPoint },
+    };
+    for (const auto& e : kTable)
+        if (_wcsicmp(dot, e.ext) == 0) return e.app;
+    return AppKind::Other;
+}
+
+static Mode SelectMode(AppKind app)
+{
+    switch (app)
+    {
+        case AppKind::Word:       return g_modeWord;
+        case AppKind::Excel:      return g_modeExcel;
+        case AppKind::PowerPoint: return g_modePowerPoint;
+        default:                  return Mode::Quick;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IDispatch helpers — thin wrappers around the standard OLE Automation
+// dance (GetIDsOfNames → Invoke). All take/return owned VARIANTs; callers
+// must VariantClear what they receive.
+// ---------------------------------------------------------------------------
+
+static HRESULT DispGetId(IDispatch* p, LPCOLESTR name, DISPID* outId)
+{
+    LPOLESTR n = const_cast<LPOLESTR>(name);
+    return p->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, outId);
+}
+
+// Invoke a method or property-get on an IDispatch with `cArgs` positional
+// arguments. Args are passed in REVERSE order, as required by IDispatch::Invoke.
+static HRESULT DispCall(IDispatch* p, LPCOLESTR name, WORD flags,
+                        VARIANT* args, UINT cArgs, VARIANT* outResult)
+{
+    DISPID id = 0;
+    HRESULT hr = DispGetId(p, name, &id);
+    if (FAILED(hr)) return hr;
+
+    DISPPARAMS dp = {};
+    dp.cArgs = cArgs;
+    dp.rgvarg = args;
+
+    // Property-put requires DISPID_PROPERTYPUT named arg.
+    DISPID putDispId = DISPID_PROPERTYPUT;
+    if (flags & (DISPATCH_PROPERTYPUT | DISPATCH_PROPERTYPUTREF))
+    {
+        dp.cNamedArgs = 1;
+        dp.rgdispidNamedArgs = &putDispId;
+    }
+
+    EXCEPINFO ex = {};
+    UINT argErr = 0;
+    return p->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT, flags,
+                     &dp, outResult, &ex, &argErr);
+}
+
+static HRESULT DispGetProperty(IDispatch* p, LPCOLESTR name, VARIANT* out)
+{
+    VariantInit(out);
+    return DispCall(p, name, DISPATCH_PROPERTYGET, nullptr, 0, out);
+}
+
+static HRESULT DispPutBool(IDispatch* p, LPCOLESTR name, bool value)
+{
+    VARIANT v;  VariantInit(&v);
+    v.vt = VT_BOOL;
+    v.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
+    return DispCall(p, name, DISPATCH_PROPERTYPUT, &v, 1, nullptr);
+}
+
+static HRESULT DispPutI4(IDispatch* p, LPCOLESTR name, LONG value)
+{
+    VARIANT v;  VariantInit(&v);
+    v.vt = VT_I4;
+    v.lVal = value;
+    return DispCall(p, name, DISPATCH_PROPERTYPUT, &v, 1, nullptr);
+}
+
+// Read an IDispatch property whose return type is another IDispatch (used
+// to walk Office object chains, e.g. Application.ActiveWindow.View).
+// Returns nullptr on failure or wrong VT; caller owns and must Release().
+static IDispatch* DispGetDispatchProperty(IDispatch* p, LPCOLESTR name)
+{
+    VARIANT v;
+    if (FAILED(DispGetProperty(p, name, &v))) return nullptr;
+    if (v.vt != VT_DISPATCH || !v.pdispVal)
+    {
+        VariantClear(&v);
+        return nullptr;
+    }
+    return v.pdispVal;       // ownership transferred to caller
+}
+
+// Read an HWND from an IDispatch property whose return type is some flavour
+// of integer (Word/Excel/PowerPoint all expose Application.Hwnd this way,
+// though the exact VT varies between Office versions).
+static HWND DispGetHwndProperty(IDispatch* p, LPCOLESTR name)
+{
+    VARIANT v;
+    HRESULT hr = DispGetProperty(p, name, &v);
+    if (FAILED(hr))
+    {
+        HostLog(L"  DispGetHwndProperty(%s): GetProperty -> 0x%08lX",
+                name, static_cast<long>(hr));
+        return nullptr;
+    }
+    HWND h = nullptr;
+    switch (v.vt)
+    {
+        case VT_I4:   h = reinterpret_cast<HWND>(static_cast<INT_PTR>(v.lVal));    break;
+        case VT_I8:   h = reinterpret_cast<HWND>(static_cast<INT_PTR>(v.llVal));   break;
+        case VT_INT:  h = reinterpret_cast<HWND>(static_cast<INT_PTR>(v.intVal));  break;
+        case VT_UI4:  h = reinterpret_cast<HWND>(static_cast<UINT_PTR>(v.ulVal));  break;
+        case VT_UI8:  h = reinterpret_cast<HWND>(static_cast<UINT_PTR>(v.ullVal)); break;
+        case VT_UINT: h = reinterpret_cast<HWND>(static_cast<UINT_PTR>(v.uintVal));break;
+        default:
+            HostLog(L"  DispGetHwndProperty(%s): unexpected VT=%d",
+                    name, static_cast<int>(v.vt));
+            break;
+    }
+    VariantClear(&v);
+    return h;
+}
+
+// Fallback HWND finder used when Application.Hwnd refuses to give us one.
+// Walks all top-level windows looking for Word's frame class ("OpusApp"),
+// optionally filtered by a substring of the window title (typically the
+// filename of the document we just opened, so we don't pick up a Word
+// instance that the user already had running for a different document).
+struct FindOpusAppCtx
+{
+    LPCWSTR  titleSubstr;       // may be null
+    HWND     found;
+};
+
+static BOOL CALLBACK FindOpusAppEnumProc(HWND hwnd, LPARAM lp)
+{
+    auto* ctx = reinterpret_cast<FindOpusAppCtx*>(lp);
+    wchar_t cls[64] = {};
+    if (GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) <= 0) return TRUE;
+    if (wcscmp(cls, L"OpusApp") != 0) return TRUE;
+    if (ctx->titleSubstr)
+    {
+        wchar_t title[512] = {};
+        GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+        if (!StrStrIW(title, ctx->titleSubstr)) return TRUE;
+    }
+    ctx->found = hwnd;
+    return FALSE;                          // stop enumerating
+}
+
+static HWND FindWordTopLevelWindow(LPCWSTR titleSubstr)
+{
+    FindOpusAppCtx ctx = { titleSubstr, nullptr };
+    EnumWindows(FindOpusAppEnumProc, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.found;
+}
+
+// ---------------------------------------------------------------------------
+// Full-mode Word lifecycle. STA thread only.
+//
+// We drive a Word.Application instance via OLE Automation and reparent its
+// top-level main window into our render pane. The instance is created lazily
+// on the first full-mode LOAD and kept alive across subsequent LOADs within
+// the same Lister session (matching the persistence behaviour of the quick-
+// mode handler). On CLOSE we Application.Quit and release.
+//
+// Word notoriously dislikes being driven for "preview" use cases — modal
+// dialogs (AutoRecovery, Activation, Trust Center) can pop up if Word's
+// global state is broken. We set DisplayAlerts=wdAlertsNone to suppress
+// the common ones, but a deeply broken install will still cause trouble.
+// ---------------------------------------------------------------------------
+
+// Forward declaration — LoadWordFullSta tears down the quick-mode handler
+// before installing Word's window into hwndRender. The definition lives
+// in the Preview handler lifecycle section below.
+static void UnloadHandlerSta();
+
+static void CloseWordDocumentSta()
+{
+    if (!g_state.pWordDoc) return;
+    VARIANT vSaveChanges; VariantInit(&vSaveChanges);
+    vSaveChanges.vt = VT_I4;
+    vSaveChanges.lVal = 0;                  // wdDoNotSaveChanges
+    DispCall(g_state.pWordDoc, L"Close", DISPATCH_METHOD, &vSaveChanges, 1, nullptr);
+    g_state.pWordDoc->Release();
+    g_state.pWordDoc = nullptr;
+}
+
+// Detach Word's main window from our render pane back to top-level and hide
+// it. Called when switching out of full-Word mode (different file type) or
+// before Application.Quit. We don't destroy the HWND — Word owns it; we just
+// undo the SetParent/style edits we did at load time.
+static void DetachWordWindowSta()
+{
+    if (!g_state.hwndWordApp) return;
+    ShowWindow(g_state.hwndWordApp, SW_HIDE);
+    SetParent(g_state.hwndWordApp, nullptr);
+    LONG_PTR style = GetWindowLongPtrW(g_state.hwndWordApp, GWL_STYLE);
+    style &= ~WS_CHILD;
+    style |= WS_OVERLAPPEDWINDOW;
+    SetWindowLongPtrW(g_state.hwndWordApp, GWL_STYLE, style);
+    g_state.hwndWordApp = nullptr;
+}
+
+static void UnloadWordFullSta(bool quitApp)
+{
+    CloseWordDocumentSta();
+    DetachWordWindowSta();
+    if (quitApp && g_state.pWordApp)
+    {
+        DispCall(g_state.pWordApp, L"Quit", DISPATCH_METHOD, nullptr, 0, nullptr);
+        g_state.pWordApp->Release();
+        g_state.pWordApp = nullptr;
+    }
+}
+
+// Tweak Word's UI for preview use. Strict rule: we only touch state that is
+// scoped to the active window / view / document. We never modify any
+// Application-level property (DisplayStatusBar, DisplayRibbon, the
+// CommandBars.ExecuteMso "MinimizeRibbon" toggle, …) because Office
+// persists those into the user's profile on Quit, and the user's regular
+// standalone Word would then start with our preview-friendly settings
+// instead of theirs.
+//
+// All steps are best-effort — any failure is logged but does not abort the
+// load, because the embedded view still works without these tweaks.
+static void ConfigureWordForPreviewSta()
+{
+    // ActiveWindow.View.Type = wdPrintView (3) — gives us the paged layout
+    // with headers, footers and page breaks that quick-mode can't render.
+    // Per-window setting; does not persist after the window is closed.
+    IDispatch* pWin = DispGetDispatchProperty(g_state.pWordApp, L"ActiveWindow");
+    if (pWin)
+    {
+        IDispatch* pView = DispGetDispatchProperty(pWin, L"View");
+        if (pView)
+        {
+            HRESULT hr = DispPutI4(pView, L"Type", 3);          // wdPrintView
+            HostLog(L"  View.Type = wdPrintView -> 0x%08lX", static_cast<long>(hr));
+
+            // Fit-to-page-width. wdPageFitBestFit scales the page to match
+            // the window width and re-fits automatically when the window is
+            // resized — important for the narrow Quick View (Ctrl+Q) pane.
+            IDispatch* pZoom = DispGetDispatchProperty(pView, L"Zoom");
+            if (pZoom)
+            {
+                HRESULT zhr = DispPutI4(pZoom, L"PageFit", 2);  // wdPageFitBestFit
+                HostLog(L"  Zoom.PageFit = wdPageFitBestFit -> 0x%08lX",
+                        static_cast<long>(zhr));
+                pZoom->Release();
+            }
+            pView->Release();
+        }
+        // Per-window rulers off.
+        HRESULT hr = DispPutBool(pWin, L"DisplayRulers", false);
+        HostLog(L"  DisplayRulers = false -> 0x%08lX", static_cast<long>(hr));
+        pWin->Release();
+    }
+
+    // Document.Protect(Type:=wdAllowOnlyReading, NoReset:=False, Password:="")
+    // — true read-only enforcement. Without this, opening with ReadOnly=True
+    // still lets the user "Edit Anyway" and trigger a Save As dialog on Ctrl+S.
+    // Per-document setting; cannot leak because we opened the document
+    // ReadOnly=True so Word cannot save the protection state back to disk.
+    if (g_state.pWordDoc)
+    {
+        VARIANT args[3];
+        for (int i = 0; i < 3; ++i) VariantInit(&args[i]);
+        args[0].vt = VT_BSTR; args[0].bstrVal = SysAllocString(L"");   // Password
+        args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_FALSE;          // NoReset
+        args[2].vt = VT_I4;   args[2].lVal    = 3;                      // Type = wdAllowOnlyReading
+
+        HRESULT hr = DispCall(g_state.pWordDoc, L"Protect",
+                              DISPATCH_METHOD, args, 3, nullptr);
+        HostLog(L"  Document.Protect(wdAllowOnlyReading) -> 0x%08lX",
+                static_cast<long>(hr));
+        SysFreeString(args[0].bstrVal);
+    }
+}
+
+// Reparent Word's main HWND into our render window and strip its decorations
+// so it looks like an embedded preview pane instead of a top-level Word window.
+static bool EmbedWordWindowSta(HWND hwndWord)
+{
+    LONG_PTR style   = GetWindowLongPtrW(hwndWord, GWL_STYLE);
+    LONG_PTR exStyle = GetWindowLongPtrW(hwndWord, GWL_EXSTYLE);
+
+    style &= ~(WS_OVERLAPPED | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+               WS_MAXIMIZEBOX | WS_SYSMENU | WS_DLGFRAME | WS_BORDER | WS_POPUP);
+    style |= WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
+    exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE |
+                 WS_EX_STATICEDGE   | WS_EX_APPWINDOW   | WS_EX_TOOLWINDOW);
+    SetWindowLongPtrW(hwndWord, GWL_STYLE,   style);
+    SetWindowLongPtrW(hwndWord, GWL_EXSTYLE, exStyle);
+
+    if (!SetParent(hwndWord, g_state.hwndRender))
+    {
+        HostLog(L"  EmbedWordWindowSta: SetParent failed err=%lu", GetLastError());
+        return false;
+    }
+    RECT rc; GetClientRect(g_state.hwndRender, &rc);
+    SetWindowPos(hwndWord, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    g_state.hwndWordApp = hwndWord;
+    return true;
+}
+
+static HRESULT LoadWordFullSta(LPCWSTR path)
+{
+    HostLog(L"LoadWordFullSta: path='%s'", path);
+
+    // Quick mode and full mode are mutually exclusive in the render pane —
+    // ensure any leftover preview handler / fallback is gone before we put
+    // Word's window in.
+    UnloadHandlerSta();
+
+    // (Re)use the live Word.Application if we already created one in this
+    // session; otherwise spin one up.
+    if (!g_state.pWordApp)
+    {
+        CLSID clsid;
+        HRESULT hr = CLSIDFromProgID(L"Word.Application", &clsid);
+        HostLog(L"  CLSIDFromProgID(Word.Application) -> 0x%08lX", static_cast<long>(hr));
+        if (FAILED(hr)) return hr;
+
+        IDispatch* pApp = nullptr;
+        hr = CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER,
+                              IID_IDispatch, reinterpret_cast<void**>(&pApp));
+        HostLog(L"  CoCreateInstance(Word.Application) -> 0x%08lX", static_cast<long>(hr));
+        if (FAILED(hr)) return hr;
+
+        // Suppress modal dialogs: wdAlertsNone (= 0).
+        VARIANT vAlerts; VariantInit(&vAlerts);
+        vAlerts.vt = VT_I4; vAlerts.lVal = 0;
+        DispCall(pApp, L"DisplayAlerts", DISPATCH_PROPERTYPUT, &vAlerts, 1, nullptr);
+        // Keep Word logically invisible until we've reparented its window.
+        DispPutBool(pApp, L"Visible", false);
+
+        g_state.pWordApp = pApp;
+    }
+    else
+    {
+        // Reusing — make sure no stale doc and no stale embedding remain.
+        CloseWordDocumentSta();
+        DetachWordWindowSta();
+    }
+
+    // Word's Documents.Open signature is (FileName, ConfirmConversions,
+    // ReadOnly, AddToRecentFiles, PasswordDocument, PasswordTemplate, Revert,
+    // WritePasswordDocument, WritePasswordTemplate, Format, Encoding, Visible,
+    // ...). Skipping parameters in positional IDispatch::Invoke is not
+    // possible (you'd need named args or VT_ERROR/DISP_E_PARAMNOTFOUND), so
+    // we pass exactly the first four positional params and rely on
+    // Application.Visible=False (set just above) to keep the document hidden
+    // until reparenting completes. IDispatch::Invoke takes args in REVERSE
+    // positional order.
+    VARIANT vDocs; VariantInit(&vDocs);
+    HRESULT hr = DispGetProperty(g_state.pWordApp, L"Documents", &vDocs);
+    if (FAILED(hr) || vDocs.vt != VT_DISPATCH)
+    {
+        HostLog(L"  get Documents -> 0x%08lX vt=%d", static_cast<long>(hr), vDocs.vt);
+        VariantClear(&vDocs);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    IDispatch* pDocs = vDocs.pdispVal;
+
+    VARIANT args[4];
+    for (int i = 0; i < 4; ++i) VariantInit(&args[i]);
+    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_FALSE;          // AddToRecentFiles
+    args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;           // ReadOnly
+    args[2].vt = VT_BOOL; args[2].boolVal = VARIANT_FALSE;          // ConfirmConversions
+    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);   // FileName
+
+    VARIANT vDoc; VariantInit(&vDoc);
+    hr = DispCall(pDocs, L"Open", DISPATCH_METHOD, args, 4, &vDoc);
+    HostLog(L"  Documents.Open -> 0x%08lX vt=%d", static_cast<long>(hr), vDoc.vt);
+    pDocs->Release();
+    SysFreeString(args[3].bstrVal);
+
+    if (FAILED(hr) || vDoc.vt != VT_DISPATCH)
+    {
+        VariantClear(&vDoc);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    g_state.pWordDoc = vDoc.pdispVal;       // owned
+
+    // Word does not materialise Application.Hwnd until the app is made
+    // visible. There's no way around a brief on-screen flash: we set
+    // Visible=True, read the HWND, then immediately SetParent it into
+    // our render pane. Empirically the flash is short enough that users
+    // perceive it as "Word's icon blipped on the taskbar".
+    DispPutBool(g_state.pWordApp, L"Visible", true);
+
+    // Modern Microsoft 365 Word does not expose Application.Hwnd via
+    // IDispatch (GetIDsOfNames returns DISP_E_UNKNOWNNAME), so we try once
+    // for backwards compatibility with older Office and immediately fall
+    // back to a class-name scan otherwise.
+    HWND hwndWord = DispGetHwndProperty(g_state.pWordApp, L"Hwnd");
+    if (!hwndWord)
+    {
+        LPCWSTR fname = wcsrchr(path, L'\\');
+        fname = fname ? fname + 1 : path;
+        // Word can take a moment to create its top-level window after
+        // Visible=True; retry the EnumWindows scan a few times.
+        for (int retry = 0; retry < 40 && !hwndWord; ++retry)
+        {
+            hwndWord = FindWordTopLevelWindow(fname);
+            if (hwndWord) break;
+            MSG m;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+            Sleep(25);
+        }
+        HostLog(L"  FindWordTopLevelWindow(title contains '%s') = 0x%p",
+                fname, hwndWord);
+        if (!hwndWord)
+        {
+            hwndWord = FindWordTopLevelWindow(nullptr);
+            HostLog(L"  FindWordTopLevelWindow(any) = 0x%p", hwndWord);
+        }
+    }
+    if (!hwndWord)
+    {
+        CloseWordDocumentSta();
+        return E_FAIL;
+    }
+    if (!EmbedWordWindowSta(hwndWord))
+    {
+        CloseWordDocumentSta();
+        return E_FAIL;
+    }
+
+    // Apply preview-friendly tweaks: Print Layout view, read-only
+    // protection, hidden status bar / rulers.
+    ConfigureWordForPreviewSta();
+
+    HostLog(L"  LoadWordFullSta SUCCESS");
+    return S_OK;
+}
+
+static void ResizeWordFullSta(int w, int h)
+{
+    if (g_state.hwndWordApp)
+    {
+        SetWindowPos(g_state.hwndWordApp, nullptr, 0, 0, w, h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Preview handler lifecycle. STA thread only.
 // ---------------------------------------------------------------------------
 
@@ -769,6 +1272,38 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     return S_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Top-level LOAD dispatcher. Picks quick vs full mode by extension+config and
+// hands off to the matching loader. On full-mode failure we degrade silently
+// to quick mode so the user always gets *some* preview.
+// ---------------------------------------------------------------------------
+
+static HRESULT LoadFileSta(LPCWSTR path)
+{
+    AppKind app  = ClassifyByExtension(path);
+    Mode    mode = SelectMode(app);
+    HostLog(L"LoadFileSta: app=%d mode=%s",
+            static_cast<int>(app),
+            mode == Mode::Full ? L"full" : L"quick");
+
+    if (mode == Mode::Full && app == AppKind::Word)
+    {
+        HRESULT hr = LoadWordFullSta(path);
+        if (SUCCEEDED(hr)) return S_OK;
+        HostLog(L"  Word full-mode failed (0x%08lX) — falling back to quick",
+                static_cast<long>(hr));
+        UnloadWordFullSta(true);            // hard reset, full Quit
+        // fall through to quick mode
+    }
+
+    // Quick mode (or full-mode fallback path). If Word is still alive from
+    // an earlier session, detach its window from our render pane but keep
+    // the process around in case the user comes back to a Word doc.
+    if (g_state.hwndWordApp) DetachWordWindowSta();
+
+    return LoadHandlerSta(path);
+}
+
 static void ResizeHandlerSta(int w, int h)
 {
     if (g_state.hwndRender)
@@ -786,6 +1321,7 @@ static void ResizeHandlerSta(int w, int h)
         SetWindowPos(g_state.hwndFallback, nullptr, 0, 0, w, h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    ResizeWordFullSta(w, h);
 }
 
 // ---------------------------------------------------------------------------
@@ -801,7 +1337,7 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_HOST_LOAD:
         {
             wchar_t* path = reinterpret_cast<wchar_t*>(lp);
-            HRESULT hr = LoadHandlerSta(path);
+            HRESULT hr = LoadFileSta(path);
             if (SUCCEEDED(hr))
             {
                 PipeWriteUtf16(g_state.hPipe, L"OK\n");
@@ -810,7 +1346,7 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 wchar_t errMsg[96] = {};
                 _snwprintf_s(errMsg, ARRAYSIZE(errMsg), _TRUNCATE,
-                             L"ERR LoadHandler hr=0x%08lX\n",
+                             L"ERR LoadFile hr=0x%08lX\n",
                              static_cast<long>(hr));
                 PipeWriteUtf16(g_state.hPipe, errMsg);
             }
@@ -828,6 +1364,7 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             HostLog(L"WM_HOST_CLOSE");
             UnloadHandlerSta();
+            UnloadWordFullSta(true);            // Quit Word if it's still alive
             DestroyRenderWindowSta();
             PipeWriteUtf16(g_state.hPipe, L"OK\n");
             PostQuitMessage(0);
