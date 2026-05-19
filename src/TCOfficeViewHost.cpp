@@ -241,12 +241,20 @@ struct HostState
     IUnknown*           pHandlerUnk     = nullptr;        // raw COM object
     IPreviewHandler*    pHandler        = nullptr;        // queried IPreviewHandler view
 
-    // Full-mode (OLE Automation) state. Currently only Word is wired up.
-    // A non-null pWordApp means the Word.Application instance is alive
-    // and is reused across LOAD commands within the same Lister session.
+    // Full-mode (OLE Automation) state, one slot per Office app. At most one
+    // of (Word, Excel, PowerPoint) is live at a time — switching to a file
+    // of a different type quits the previously loaded app. Within a Lister
+    // session, switches between files of the *same* app reuse the running
+    // Application instance and just close/open the document.
     IDispatch*          pWordApp        = nullptr;
     IDispatch*          pWordDoc        = nullptr;
     HWND                hwndWordApp     = nullptr;        // Word main window reparented into hwndRender
+    IDispatch*          pExcelApp       = nullptr;
+    IDispatch*          pExcelWb        = nullptr;
+    HWND                hwndExcelApp    = nullptr;        // Excel main window reparented into hwndRender
+    IDispatch*          pPptApp         = nullptr;
+    IDispatch*          pPptPres        = nullptr;
+    HWND                hwndPptApp      = nullptr;        // PowerPoint main window reparented into hwndRender
 };
 
 static HostState g_state;
@@ -796,22 +804,24 @@ static HWND DispGetHwndProperty(IDispatch* p, LPCOLESTR name)
 }
 
 // Fallback HWND finder used when Application.Hwnd refuses to give us one.
-// Walks all top-level windows looking for Word's frame class ("OpusApp"),
+// Walks all top-level windows looking for the requested Office frame class
+// ("OpusApp" for Word, "XLMAIN" for Excel, "PPTFrameClass" for PowerPoint),
 // optionally filtered by a substring of the window title (typically the
-// filename of the document we just opened, so we don't pick up a Word
-// instance that the user already had running for a different document).
-struct FindOpusAppCtx
+// filename of the document we just opened, so we don't pick up an instance
+// the user already had running for a different document).
+struct FindOfficeWndCtx
 {
+    LPCWSTR  className;
     LPCWSTR  titleSubstr;       // may be null
     HWND     found;
 };
 
-static BOOL CALLBACK FindOpusAppEnumProc(HWND hwnd, LPARAM lp)
+static BOOL CALLBACK FindOfficeWndEnumProc(HWND hwnd, LPARAM lp)
 {
-    auto* ctx = reinterpret_cast<FindOpusAppCtx*>(lp);
+    auto* ctx = reinterpret_cast<FindOfficeWndCtx*>(lp);
     wchar_t cls[64] = {};
     if (GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) <= 0) return TRUE;
-    if (wcscmp(cls, L"OpusApp") != 0) return TRUE;
+    if (wcscmp(cls, ctx->className) != 0) return TRUE;
     if (ctx->titleSubstr)
     {
         wchar_t title[512] = {};
@@ -822,10 +832,10 @@ static BOOL CALLBACK FindOpusAppEnumProc(HWND hwnd, LPARAM lp)
     return FALSE;                          // stop enumerating
 }
 
-static HWND FindWordTopLevelWindow(LPCWSTR titleSubstr)
+static HWND FindOfficeTopLevelWindow(LPCWSTR className, LPCWSTR titleSubstr)
 {
-    FindOpusAppCtx ctx = { titleSubstr, nullptr };
-    EnumWindows(FindOpusAppEnumProc, reinterpret_cast<LPARAM>(&ctx));
+    FindOfficeWndCtx ctx = { className, titleSubstr, nullptr };
+    EnumWindows(FindOfficeWndEnumProc, reinterpret_cast<LPARAM>(&ctx));
     return ctx.found;
 }
 
@@ -844,10 +854,12 @@ static HWND FindWordTopLevelWindow(LPCWSTR titleSubstr)
 // the common ones, but a deeply broken install will still cause trouble.
 // ---------------------------------------------------------------------------
 
-// Forward declaration — LoadWordFullSta tears down the quick-mode handler
-// before installing Word's window into hwndRender. The definition lives
-// in the Preview handler lifecycle section below.
+// Forward declarations — each LoadXxxFullSta tears down the quick-mode
+// handler and the other two Office apps before installing its own window
+// into hwndRender. Definitions live in the sections below.
 static void UnloadHandlerSta();
+static void UnloadExcelFullSta(bool quitApp);
+static void UnloadPptFullSta(bool quitApp);
 
 static void CloseWordDocumentSta()
 {
@@ -952,30 +964,108 @@ static void ConfigureWordForPreviewSta()
     }
 }
 
-// Reparent Word's main HWND into our render window and strip its decorations
-// so it looks like an embedded preview pane instead of a top-level Word window.
-static bool EmbedWordWindowSta(HWND hwndWord)
+// Excel preview tweaks: set a fixed 100% zoom. We deliberately don't
+// touch Application.WindowState — for a WS_CHILD Excel frame, both
+// xlNormal and xlMaximized produce visual glitches (the latter blanks
+// the ribbon entirely). Layout for the initial size is handled in
+// LoadExcelFullSta by setting Application.Width/Height *before*
+// Workbooks.Open; ResizeOfficeFullSta keeps them in sync on resize.
+// Excel preview tweak: fixed 100% zoom. Per-window setting that does not
+// modify the workbook on disk (we opened ReadOnly).
+//
+// Known limit: Excel doesn't relayout its child widgets (ribbon, XLDESK,
+// sheet tabs, status bar) when the embedded Win32 frame is resized
+// programmatically — neither SetWindowPos, Application.Width/Height,
+// Application.WindowState nor ActiveWindow.WindowState reliably triggers
+// it. The initial layout is correct thanks to pre-Open Width/Height in
+// LoadExcelFullSta, but subsequent Lister resizes leave Excel's content
+// anchored to the original area. Reopening the Lister forces a fresh
+// initial layout at the new size.
+static void ConfigureExcelForPreviewSta()
 {
-    LONG_PTR style   = GetWindowLongPtrW(hwndWord, GWL_STYLE);
-    LONG_PTR exStyle = GetWindowLongPtrW(hwndWord, GWL_EXSTYLE);
+    IDispatch* pWin = DispGetDispatchProperty(g_state.pExcelApp, L"ActiveWindow");
+    if (pWin)
+    {
+        VARIANT v; VariantInit(&v);
+        v.vt = VT_I4; v.lVal = 100;                 // percentage, clamped 10..400
+        HRESULT hr = DispCall(pWin, L"Zoom",
+                              DISPATCH_PROPERTYPUT, &v, 1, nullptr);
+        HostLog(L"  Excel ActiveWindow.Zoom = 100 -> 0x%08lX",
+                static_cast<long>(hr));
+        pWin->Release();
+    }
+}
+
+// Tell Excel its application window is W × H pixels (converted to
+// points, which is the unit Application.Width/Height use). Idempotent;
+// safe to call before Workbooks.Open and again on each resize.
+static void ApplyExcelAppSizeSta(int wPx, int hPx)
+{
+    if (!g_state.pExcelApp || !g_state.hwndRender) return;
+    UINT dpi = GetDpiForWindow(g_state.hwndRender);
+    if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
+
+    VARIANT vW; VariantInit(&vW);
+    vW.vt = VT_R8;
+    vW.dblVal = static_cast<double>(wPx) * 72.0 / dpi;
+    DispCall(g_state.pExcelApp, L"Width",
+             DISPATCH_PROPERTYPUT, &vW, 1, nullptr);
+
+    VARIANT vH; VariantInit(&vH);
+    vH.vt = VT_R8;
+    vH.dblVal = static_cast<double>(hPx) * 72.0 / dpi;
+    DispCall(g_state.pExcelApp, L"Height",
+             DISPATCH_PROPERTYPUT, &vH, 1, nullptr);
+}
+
+// PowerPoint preview tweaks: ZoomToFit makes PowerPoint scale the current
+// slide so it fits the View window — and unlike Excel, PowerPoint *does*
+// re-fit automatically when the window is resized.
+static void ConfigurePowerPointForPreviewSta()
+{
+    IDispatch* pWin = DispGetDispatchProperty(g_state.pPptApp, L"ActiveWindow");
+    if (pWin)
+    {
+        IDispatch* pView = DispGetDispatchProperty(pWin, L"View");
+        if (pView)
+        {
+            // ZoomToFit accepts an MsoTriState (Long: -1 = msoTrue).
+            VARIANT v; VariantInit(&v);
+            v.vt = VT_I4; v.lVal = -1;
+            HRESULT hr = DispCall(pView, L"ZoomToFit",
+                                  DISPATCH_PROPERTYPUT, &v, 1, nullptr);
+            HostLog(L"  PowerPoint View.ZoomToFit = msoTrue -> 0x%08lX",
+                    static_cast<long>(hr));
+            pView->Release();
+        }
+        pWin->Release();
+    }
+}
+
+// Reparent an Office app's main HWND into our render window and strip its
+// decorations so it looks like an embedded preview pane instead of a
+// top-level frame. Caller stores the HWND in the appropriate HostState slot.
+static bool EmbedOfficeWindowSta(HWND hwndApp)
+{
+    LONG_PTR style   = GetWindowLongPtrW(hwndApp, GWL_STYLE);
+    LONG_PTR exStyle = GetWindowLongPtrW(hwndApp, GWL_EXSTYLE);
 
     style &= ~(WS_OVERLAPPED | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
                WS_MAXIMIZEBOX | WS_SYSMENU | WS_DLGFRAME | WS_BORDER | WS_POPUP);
     style |= WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
     exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE |
                  WS_EX_STATICEDGE   | WS_EX_APPWINDOW   | WS_EX_TOOLWINDOW);
-    SetWindowLongPtrW(hwndWord, GWL_STYLE,   style);
-    SetWindowLongPtrW(hwndWord, GWL_EXSTYLE, exStyle);
+    SetWindowLongPtrW(hwndApp, GWL_STYLE,   style);
+    SetWindowLongPtrW(hwndApp, GWL_EXSTYLE, exStyle);
 
-    if (!SetParent(hwndWord, g_state.hwndRender))
+    if (!SetParent(hwndApp, g_state.hwndRender))
     {
-        HostLog(L"  EmbedWordWindowSta: SetParent failed err=%lu", GetLastError());
+        HostLog(L"  EmbedOfficeWindowSta: SetParent failed err=%lu", GetLastError());
         return false;
     }
     RECT rc; GetClientRect(g_state.hwndRender, &rc);
-    SetWindowPos(hwndWord, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+    SetWindowPos(hwndApp, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-    g_state.hwndWordApp = hwndWord;
     return true;
 }
 
@@ -983,10 +1073,12 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
 {
     HostLog(L"LoadWordFullSta: path='%s'", path);
 
-    // Quick mode and full mode are mutually exclusive in the render pane —
-    // ensure any leftover preview handler / fallback is gone before we put
-    // Word's window in.
+    // Only one full-mode app can be embedded in the render pane at a time.
+    // Tear down any leftover quick-mode handler and any other Office app
+    // before installing Word.
     UnloadHandlerSta();
+    UnloadExcelFullSta(true);
+    UnloadPptFullSta(true);
 
     // (Re)use the live Word.Application if we already created one in this
     // session; otherwise spin one up.
@@ -1078,7 +1170,7 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
         // Visible=True; retry the EnumWindows scan a few times.
         for (int retry = 0; retry < 40 && !hwndWord; ++retry)
         {
-            hwndWord = FindWordTopLevelWindow(fname);
+            hwndWord = FindOfficeTopLevelWindow(L"OpusApp", fname);
             if (hwndWord) break;
             MSG m;
             while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
@@ -1088,12 +1180,12 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
             }
             Sleep(25);
         }
-        HostLog(L"  FindWordTopLevelWindow(title contains '%s') = 0x%p",
+        HostLog(L"  FindOfficeTopLevelWindow(OpusApp '%s') = 0x%p",
                 fname, hwndWord);
         if (!hwndWord)
         {
-            hwndWord = FindWordTopLevelWindow(nullptr);
-            HostLog(L"  FindWordTopLevelWindow(any) = 0x%p", hwndWord);
+            hwndWord = FindOfficeTopLevelWindow(L"OpusApp", nullptr);
+            HostLog(L"  FindOfficeTopLevelWindow(OpusApp any) = 0x%p", hwndWord);
         }
     }
     if (!hwndWord)
@@ -1101,11 +1193,12 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
         CloseWordDocumentSta();
         return E_FAIL;
     }
-    if (!EmbedWordWindowSta(hwndWord))
+    if (!EmbedOfficeWindowSta(hwndWord))
     {
         CloseWordDocumentSta();
         return E_FAIL;
     }
+    g_state.hwndWordApp = hwndWord;
 
     // Apply preview-friendly tweaks: Print Layout view, read-only
     // protection, hidden status bar / rulers.
@@ -1115,12 +1208,357 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
     return S_OK;
 }
 
-static void ResizeWordFullSta(int w, int h)
+// ---------------------------------------------------------------------------
+// Full-mode Excel lifecycle. Mirrors the Word path but with Excel-specific
+// COM names: Excel.Application / Workbooks / Workbook. Excel can run with
+// Visible=False until embedded, so the brief on-screen flash before
+// reparenting is short.
+// ---------------------------------------------------------------------------
+
+static void CloseExcelWorkbookSta()
 {
+    if (!g_state.pExcelWb) return;
+    // Excel.Workbook.Close(SaveChanges) — Boolean (not the Word enum).
+    VARIANT vSave; VariantInit(&vSave);
+    vSave.vt = VT_BOOL; vSave.boolVal = VARIANT_FALSE;
+    DispCall(g_state.pExcelWb, L"Close", DISPATCH_METHOD, &vSave, 1, nullptr);
+    g_state.pExcelWb->Release();
+    g_state.pExcelWb = nullptr;
+}
+
+static void DetachExcelWindowSta()
+{
+    if (!g_state.hwndExcelApp) return;
+    ShowWindow(g_state.hwndExcelApp, SW_HIDE);
+    SetParent(g_state.hwndExcelApp, nullptr);
+    LONG_PTR style = GetWindowLongPtrW(g_state.hwndExcelApp, GWL_STYLE);
+    style &= ~WS_CHILD;
+    style |= WS_OVERLAPPEDWINDOW;
+    SetWindowLongPtrW(g_state.hwndExcelApp, GWL_STYLE, style);
+    g_state.hwndExcelApp = nullptr;
+}
+
+static void UnloadExcelFullSta(bool quitApp)
+{
+    CloseExcelWorkbookSta();
+    DetachExcelWindowSta();
+    if (quitApp && g_state.pExcelApp)
+    {
+        DispCall(g_state.pExcelApp, L"Quit", DISPATCH_METHOD, nullptr, 0, nullptr);
+        g_state.pExcelApp->Release();
+        g_state.pExcelApp = nullptr;
+    }
+}
+
+static HRESULT LoadExcelFullSta(LPCWSTR path)
+{
+    HostLog(L"LoadExcelFullSta: path='%s'", path);
+
+    // Only one full-mode app at a time; tear down the others.
+    UnloadHandlerSta();
+    UnloadWordFullSta(true);
+    UnloadPptFullSta(true);                  // forward-declared below
+
+    if (!g_state.pExcelApp)
+    {
+        CLSID clsid;
+        HRESULT hr = CLSIDFromProgID(L"Excel.Application", &clsid);
+        HostLog(L"  CLSIDFromProgID(Excel.Application) -> 0x%08lX",
+                static_cast<long>(hr));
+        if (FAILED(hr)) return hr;
+
+        IDispatch* pApp = nullptr;
+        hr = CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER,
+                              IID_IDispatch, reinterpret_cast<void**>(&pApp));
+        HostLog(L"  CoCreateInstance(Excel.Application) -> 0x%08lX",
+                static_cast<long>(hr));
+        if (FAILED(hr)) return hr;
+
+        // Excel.DisplayAlerts is a Boolean.
+        DispPutBool(pApp, L"DisplayAlerts", false);
+        DispPutBool(pApp, L"Visible", false);
+        g_state.pExcelApp = pApp;
+    }
+    else
+    {
+        CloseExcelWorkbookSta();
+        DetachExcelWindowSta();
+    }
+
+    // Pre-size Excel to match our render pane *before* opening the
+    // workbook. Excel persists its frame size in the user profile, so
+    // a freshly created instance starts at whatever size the user's
+    // last standalone Excel session was — usually wildly different from
+    // our Lister pane. If we let Excel lay the workbook out at that
+    // saved size and then resize the Win32 frame, Excel's child widgets
+    // (ribbon, sheet tabs, status bar) stay anchored to the old size
+    // and end up clipped or stranded. Setting Width/Height up-front
+    // makes Excel's initial layout match the embed target.
+    {
+        RECT rc; GetClientRect(g_state.hwndRender, &rc);
+        ApplyExcelAppSizeSta(rc.right - rc.left, rc.bottom - rc.top);
+    }
+
+    // Workbooks.Open(FileName, UpdateLinks, ReadOnly, ...). Args in REVERSE
+    // positional order. UpdateLinks=0 (xlUpdateLinksNever) prevents the
+    // "do you want to update links?" dialog from blocking us.
+    VARIANT vWbs; VariantInit(&vWbs);
+    HRESULT hr = DispGetProperty(g_state.pExcelApp, L"Workbooks", &vWbs);
+    if (FAILED(hr) || vWbs.vt != VT_DISPATCH)
+    {
+        HostLog(L"  get Workbooks -> 0x%08lX vt=%d",
+                static_cast<long>(hr), vWbs.vt);
+        VariantClear(&vWbs);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    IDispatch* pWbs = vWbs.pdispVal;
+
+    VARIANT args[3];
+    for (int i = 0; i < 3; ++i) VariantInit(&args[i]);
+    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_TRUE;           // ReadOnly
+    args[1].vt = VT_I4;   args[1].lVal    = 0;                      // UpdateLinks = xlUpdateLinksNever
+    args[2].vt = VT_BSTR; args[2].bstrVal = SysAllocString(path);   // FileName
+
+    VARIANT vWb; VariantInit(&vWb);
+    hr = DispCall(pWbs, L"Open", DISPATCH_METHOD, args, 3, &vWb);
+    HostLog(L"  Workbooks.Open -> 0x%08lX vt=%d",
+            static_cast<long>(hr), vWb.vt);
+    pWbs->Release();
+    SysFreeString(args[2].bstrVal);
+
+    if (FAILED(hr) || vWb.vt != VT_DISPATCH)
+    {
+        VariantClear(&vWb);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    g_state.pExcelWb = vWb.pdispVal;
+
+    DispPutBool(g_state.pExcelApp, L"Visible", true);
+
+    HWND hwndExcel = DispGetHwndProperty(g_state.pExcelApp, L"Hwnd");
+    if (!hwndExcel)
+    {
+        LPCWSTR fname = wcsrchr(path, L'\\');
+        fname = fname ? fname + 1 : path;
+        for (int retry = 0; retry < 40 && !hwndExcel; ++retry)
+        {
+            hwndExcel = FindOfficeTopLevelWindow(L"XLMAIN", fname);
+            if (hwndExcel) break;
+            MSG m;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+            Sleep(25);
+        }
+        HostLog(L"  FindOfficeTopLevelWindow(XLMAIN '%s') = 0x%p",
+                fname, hwndExcel);
+        if (!hwndExcel)
+        {
+            hwndExcel = FindOfficeTopLevelWindow(L"XLMAIN", nullptr);
+            HostLog(L"  FindOfficeTopLevelWindow(XLMAIN any) = 0x%p", hwndExcel);
+        }
+    }
+    if (!hwndExcel)
+    {
+        CloseExcelWorkbookSta();
+        return E_FAIL;
+    }
+    if (!EmbedOfficeWindowSta(hwndExcel))
+    {
+        CloseExcelWorkbookSta();
+        return E_FAIL;
+    }
+    g_state.hwndExcelApp = hwndExcel;
+
+    ConfigureExcelForPreviewSta();
+
+    HostLog(L"  LoadExcelFullSta SUCCESS");
+    return S_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Full-mode PowerPoint lifecycle. Unlike Word and Excel, PowerPoint cannot
+// run with Application.Visible = False — the property rejects msoFalse —
+// so its main window is always on-screen between CoCreateInstance and our
+// reparent. The visible flash is brief but unavoidable.
+// ---------------------------------------------------------------------------
+
+static void ClosePptPresentationSta()
+{
+    if (!g_state.pPptPres) return;
+    // Tell PowerPoint there are no unsaved changes so Close() doesn't prompt.
+    DispPutBool(g_state.pPptPres, L"Saved", true);
+    DispCall(g_state.pPptPres, L"Close", DISPATCH_METHOD, nullptr, 0, nullptr);
+    g_state.pPptPres->Release();
+    g_state.pPptPres = nullptr;
+}
+
+static void DetachPptWindowSta()
+{
+    if (!g_state.hwndPptApp) return;
+    ShowWindow(g_state.hwndPptApp, SW_HIDE);
+    SetParent(g_state.hwndPptApp, nullptr);
+    LONG_PTR style = GetWindowLongPtrW(g_state.hwndPptApp, GWL_STYLE);
+    style &= ~WS_CHILD;
+    style |= WS_OVERLAPPEDWINDOW;
+    SetWindowLongPtrW(g_state.hwndPptApp, GWL_STYLE, style);
+    g_state.hwndPptApp = nullptr;
+}
+
+static void UnloadPptFullSta(bool quitApp)
+{
+    ClosePptPresentationSta();
+    DetachPptWindowSta();
+    if (quitApp && g_state.pPptApp)
+    {
+        DispCall(g_state.pPptApp, L"Quit", DISPATCH_METHOD, nullptr, 0, nullptr);
+        g_state.pPptApp->Release();
+        g_state.pPptApp = nullptr;
+    }
+}
+
+static HRESULT LoadPowerPointFullSta(LPCWSTR path)
+{
+    HostLog(L"LoadPowerPointFullSta: path='%s'", path);
+
+    UnloadHandlerSta();
+    UnloadWordFullSta(true);
+    UnloadExcelFullSta(true);
+
+    if (!g_state.pPptApp)
+    {
+        CLSID clsid;
+        HRESULT hr = CLSIDFromProgID(L"PowerPoint.Application", &clsid);
+        HostLog(L"  CLSIDFromProgID(PowerPoint.Application) -> 0x%08lX",
+                static_cast<long>(hr));
+        if (FAILED(hr)) return hr;
+
+        IDispatch* pApp = nullptr;
+        hr = CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER,
+                              IID_IDispatch, reinterpret_cast<void**>(&pApp));
+        HostLog(L"  CoCreateInstance(PowerPoint.Application) -> 0x%08lX",
+                static_cast<long>(hr));
+        if (FAILED(hr)) return hr;
+
+        // PowerPoint.DisplayAlerts uses an enum (ppAlertsNone = 1).
+        VARIANT vAlerts; VariantInit(&vAlerts);
+        vAlerts.vt = VT_I4; vAlerts.lVal = 1;
+        DispCall(pApp, L"DisplayAlerts", DISPATCH_PROPERTYPUT, &vAlerts, 1, nullptr);
+        // PowerPoint refuses Visible=False. The window will be on screen
+        // between Presentations.Open and our reparent — accept the brief flash.
+
+        g_state.pPptApp = pApp;
+    }
+    else
+    {
+        ClosePptPresentationSta();
+        DetachPptWindowSta();
+    }
+
+    // Presentations.Open(FileName, ReadOnly, Untitled, WithWindow). Args
+    // in REVERSE positional order. Microsoft constants are MsoTriState:
+    // msoTrue = -1, msoFalse = 0.
+    VARIANT vPress; VariantInit(&vPress);
+    HRESULT hr = DispGetProperty(g_state.pPptApp, L"Presentations", &vPress);
+    if (FAILED(hr) || vPress.vt != VT_DISPATCH)
+    {
+        HostLog(L"  get Presentations -> 0x%08lX vt=%d",
+                static_cast<long>(hr), vPress.vt);
+        VariantClear(&vPress);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    IDispatch* pPresentations = vPress.pdispVal;
+
+    VARIANT args[4];
+    for (int i = 0; i < 4; ++i) VariantInit(&args[i]);
+    args[0].vt = VT_I4;   args[0].lVal    = -1;                     // WithWindow = msoTrue
+    args[1].vt = VT_I4;   args[1].lVal    = 0;                      // Untitled = msoFalse
+    args[2].vt = VT_I4;   args[2].lVal    = -1;                     // ReadOnly = msoTrue
+    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);   // FileName
+
+    VARIANT vPres; VariantInit(&vPres);
+    hr = DispCall(pPresentations, L"Open", DISPATCH_METHOD, args, 4, &vPres);
+    HostLog(L"  Presentations.Open -> 0x%08lX vt=%d",
+            static_cast<long>(hr), vPres.vt);
+    pPresentations->Release();
+    SysFreeString(args[3].bstrVal);
+
+    if (FAILED(hr) || vPres.vt != VT_DISPATCH)
+    {
+        VariantClear(&vPres);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    g_state.pPptPres = vPres.pdispVal;
+
+    HWND hwndPpt = DispGetHwndProperty(g_state.pPptApp, L"HWND");        // PowerPoint uses uppercase HWND
+    if (!hwndPpt)
+        hwndPpt = DispGetHwndProperty(g_state.pPptApp, L"Hwnd");         // fall back to mixed case
+    if (!hwndPpt)
+    {
+        LPCWSTR fname = wcsrchr(path, L'\\');
+        fname = fname ? fname + 1 : path;
+        for (int retry = 0; retry < 40 && !hwndPpt; ++retry)
+        {
+            hwndPpt = FindOfficeTopLevelWindow(L"PPTFrameClass", fname);
+            if (hwndPpt) break;
+            MSG m;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+            Sleep(25);
+        }
+        HostLog(L"  FindOfficeTopLevelWindow(PPTFrameClass '%s') = 0x%p",
+                fname, hwndPpt);
+        if (!hwndPpt)
+        {
+            hwndPpt = FindOfficeTopLevelWindow(L"PPTFrameClass", nullptr);
+            HostLog(L"  FindOfficeTopLevelWindow(PPTFrameClass any) = 0x%p",
+                    hwndPpt);
+        }
+    }
+    if (!hwndPpt)
+    {
+        ClosePptPresentationSta();
+        return E_FAIL;
+    }
+    if (!EmbedOfficeWindowSta(hwndPpt))
+    {
+        ClosePptPresentationSta();
+        return E_FAIL;
+    }
+    g_state.hwndPptApp = hwndPpt;
+
+    ConfigurePowerPointForPreviewSta();
+
+    HostLog(L"  LoadPowerPointFullSta SUCCESS");
+    return S_OK;
+}
+
+static void ResizeOfficeFullSta(int w, int h)
+{
+    const UINT kFlags = SWP_NOZORDER | SWP_NOACTIVATE;
+
+    // Only one of the three is non-null at any moment, but checking all
+    // is cheap and avoids having to track "currently active app" state.
     if (g_state.hwndWordApp)
     {
-        SetWindowPos(g_state.hwndWordApp, nullptr, 0, 0, w, h,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(g_state.hwndWordApp, nullptr, 0, 0, w, h, kFlags);
+    }
+    if (g_state.hwndExcelApp)
+    {
+        // Plain Win32 resize. Excel won't actually relayout its child
+        // widgets on this (see comment in ConfigureExcelForPreviewSta);
+        // we set the frame size for consistency with Word / PowerPoint
+        // even though the visible content stays at its load-time layout.
+        SetWindowPos(g_state.hwndExcelApp, nullptr, 0, 0, w, h, kFlags);
+    }
+    if (g_state.hwndPptApp)
+    {
+        SetWindowPos(g_state.hwndPptApp, nullptr, 0, 0, w, h, kFlags);
     }
 }
 
@@ -1286,20 +1724,45 @@ static HRESULT LoadFileSta(LPCWSTR path)
             static_cast<int>(app),
             mode == Mode::Full ? L"full" : L"quick");
 
-    if (mode == Mode::Full && app == AppKind::Word)
+    if (mode == Mode::Full)
     {
-        HRESULT hr = LoadWordFullSta(path);
-        if (SUCCEEDED(hr)) return S_OK;
-        HostLog(L"  Word full-mode failed (0x%08lX) — falling back to quick",
-                static_cast<long>(hr));
-        UnloadWordFullSta(true);            // hard reset, full Quit
-        // fall through to quick mode
+        HRESULT hr = E_FAIL;
+        LPCWSTR appName = L"?";
+        if (app == AppKind::Word)
+        {
+            appName = L"Word";
+            hr = LoadWordFullSta(path);
+        }
+        else if (app == AppKind::Excel)
+        {
+            appName = L"Excel";
+            hr = LoadExcelFullSta(path);
+        }
+        else if (app == AppKind::PowerPoint)
+        {
+            appName = L"PowerPoint";
+            hr = LoadPowerPointFullSta(path);
+        }
+
+        if (app == AppKind::Word || app == AppKind::Excel || app == AppKind::PowerPoint)
+        {
+            if (SUCCEEDED(hr)) return S_OK;
+            HostLog(L"  %s full-mode failed (0x%08lX) — falling back to quick",
+                    appName, static_cast<long>(hr));
+            // Hard-reset all three app slots so quick mode starts from a
+            // clean state. Each Unload is a no-op if its slot was empty.
+            UnloadWordFullSta(true);
+            UnloadExcelFullSta(true);
+            UnloadPptFullSta(true);
+            // fall through to quick mode
+        }
     }
 
-    // Quick mode (or full-mode fallback path). If Word is still alive from
-    // an earlier session, detach its window from our render pane but keep
-    // the process around in case the user comes back to a Word doc.
-    if (g_state.hwndWordApp) DetachWordWindowSta();
+    // Quick mode (or full-mode fallback path). If any Office app's window
+    // is still parented under the render pane, detach it first.
+    if (g_state.hwndWordApp)  DetachWordWindowSta();
+    if (g_state.hwndExcelApp) DetachExcelWindowSta();
+    if (g_state.hwndPptApp)   DetachPptWindowSta();
 
     return LoadHandlerSta(path);
 }
@@ -1321,7 +1784,7 @@ static void ResizeHandlerSta(int w, int h)
         SetWindowPos(g_state.hwndFallback, nullptr, 0, 0, w, h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    ResizeWordFullSta(w, h);
+    ResizeOfficeFullSta(w, h);
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,7 +1827,11 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             HostLog(L"WM_HOST_CLOSE");
             UnloadHandlerSta();
-            UnloadWordFullSta(true);            // Quit Word if it's still alive
+            // Quit any Office app that's still alive. Each is a no-op if
+            // its slot is empty.
+            UnloadWordFullSta(true);
+            UnloadExcelFullSta(true);
+            UnloadPptFullSta(true);
             DestroyRenderWindowSta();
             PipeWriteUtf16(g_state.hPipe, L"OK\n");
             PostQuitMessage(0);

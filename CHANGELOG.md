@@ -9,41 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Opt-in **full render mode** for Word documents, configured per
-  application under a new `[Mode]` INI section. When `Mode/Word=full`
-  is set, the plugin drives a Word.Application instance via OLE
-  Automation and reparents its main window into the Lister pane,
-  giving Print Layout rendering (proper pagination, headers and
-  footers) instead of the simplified Web Layout produced by the
-  Preview Handler. Cold start is slower (~2–4 s) and memory use is
-  higher (~100–300 MB), so the default remains `quick`. On any
-  failure (missing Office, protected document, COM activation
-  refused, …) the plugin transparently falls back to quick mode.
-- Per-document preview tweaks applied in full mode:
-  - `ActiveWindow.View.Type = wdPrintView` — Print Layout view.
-  - `ActiveWindow.View.Zoom.PageFit = wdPageFitBestFit` — zoom is
-    fitted to the page width and re-fits automatically when the
-    Lister pane is resized (important for the narrow Quick View
-    [Ctrl+Q] pane).
-  - `ActiveWindow.DisplayRulers = False` — rulers hidden.
-  - `Document.Protect(wdAllowOnlyReading)` — read-only enforcement
-    on top of the `ReadOnly=True` open flag, so typing in the
-    document is blocked and Ctrl+S has nothing to save.
-- INI keys `[Mode] Excel` and `[Mode] PowerPoint` are reserved (also
-  defaulting to `quick`); both currently behave as `quick` regardless
-  of the configured value — full-mode handlers for them are planned.
+- Opt-in **full render mode** for Word, Excel and PowerPoint,
+  configured per application under a new `[Mode]` INI section
+  (`Word=full`, `Excel=full`, `PowerPoint=full`). When enabled for a
+  given application, the plugin launches a real Word / Excel /
+  PowerPoint instance in the background, opens the file read-only,
+  and embeds the application's main window into the Lister pane.
+  Documents then render exactly the way the real application draws
+  them — Word in Print Layout with proper pagination, headers and
+  footers; Excel in its real grid; PowerPoint with full slide
+  formatting — instead of through the simplified rendering pipeline
+  the Preview Handler uses. Cold start is slower (~2–4 s per
+  application) and memory use is higher (~100–300 MB per instance),
+  so the default remains `quick`. On any failure (missing Office,
+  password-protected document, COM activation refused, …) the
+  plugin transparently falls back to quick mode for that file. Only
+  one full-mode application can be embedded at a time — switching
+  to a file of a different application type quits the previously
+  loaded one.
+- Per-app preview niceties in full mode:
+  - **Word** — Print Layout view, page-width zoom that auto-refits
+    on Lister resize, rulers hidden, runtime read-only enforcement
+    so typing in the preview is blocked.
+  - **Excel** — zoom locked to 100% on load; initial frame size
+    matches the Lister pane. Excel does not relayout when the pane
+    is later resized (a fundamental limitation of embedding Excel
+    as a child window via OLE Automation that no combination of
+    SetWindowPos, Application.Width/Height, WindowState toggles
+    or WM_EXITSIZEMOVE synthesis convinced Excel to perform);
+    reopening the Lister at the desired size triggers a fresh
+    correct layout.
+  - **PowerPoint** — slide zoom auto-refits to the Lister pane on
+    every resize. PowerPoint's main window appears briefly on
+    screen before being embedded (a short visible flash) because
+    PowerPoint cannot be told to run invisibly; Word and Excel
+    embed silently.
 
 ### Notes
 
-- Full mode deliberately changes **no Application-level Word setting**
-  (status bar, ribbon state, default zoom, …). Office persists those
-  to the user's profile on Quit, so changing them in our preview
-  process would leak into the user's standalone Word. Only window-,
-  view- and document-scoped settings are touched.
-- Modern Microsoft 365 Word no longer exposes `Application.Hwnd`
-  through IDispatch. When it returns `DISP_E_UNKNOWNNAME` the plugin
-  falls back to `EnumWindows` looking for an `OpusApp` window whose
-  title contains the document filename.
+- Full mode deliberately changes no Office Application-wide settings
+  (status bar, ribbon state, default zoom, …) because Office
+  persists those into the user's profile on Quit. Only per-window /
+  per-document settings are touched, so your standalone Word, Excel
+  and PowerPoint will start up exactly as you left them.
 
 ## [1.0.0] – 2026-05-18
 

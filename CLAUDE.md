@@ -116,7 +116,8 @@ short timer to avoid stalling TC's UI on the pipe write.
   are checked explicitly and turned into `ERR` responses; do not let C++
   exceptions escape into COM.
 - **STA discipline in the host.** All COM calls (`CoCreateInstance`,
-  `IPreviewHandler::*`, `IDispatch::Invoke` on Word.Application) must
+  `IPreviewHandler::*`, `IDispatch::Invoke` on Word / Excel /
+  PowerPoint Application) must
   happen on the STA thread. The pipe reader runs on a worker thread and
   dispatches via `PostMessage` to a message-only window on the STA
   thread. `SendMessage` would put the STA into the input-synchronous
@@ -158,9 +159,8 @@ Sections currently honoured:
   Console → Courier New. Font is DPI-aware (`GetDpiForWindow` +
   `MulDiv`).
 - `[Mode] Word=` / `Excel=` / `PowerPoint=` — `quick` (default) selects
-  the Preview Handler path; `full` selects OLE Automation path. Only
-  `Word=full` is implemented; Excel/PowerPoint keys are accepted but
-  currently behave as `quick`.
+  the Preview Handler path; `full` selects the OLE Automation path. All
+  three apps are implemented in full mode.
 
 The fallback panel is a child `EDIT` control inside `hwndRender`,
 created on any failure from `FindPreviewHandlerClsid` /
@@ -176,48 +176,85 @@ panel is sized in `ResizeHandlerSta` and torn down in
 extension into `AppKind { Other, Word, Excel, PowerPoint }`, looks up the
 matching `Mode` from `[Mode]`, and dispatches:
 
-- `Mode::Full` + `AppKind::Word` → `LoadWordFullSta`. On any failure it
-  silently falls back to the quick path (so the user always gets *some*
-  preview, even if Word is broken or missing).
-- Everything else → `LoadHandlerSta` (the original preview-handler path).
+- `Mode::Full` + `AppKind::Word` → `LoadWordFullSta`
+- `Mode::Full` + `AppKind::Excel` → `LoadExcelFullSta`
+- `Mode::Full` + `AppKind::PowerPoint` → `LoadPowerPointFullSta`
+- Anything else → `LoadHandlerSta` (the original preview-handler path).
 
-Full-mode Word uses **OLE Automation via raw `IDispatch`** — no type
-library `#import`, no MFC. The thin helpers `DispGetId`, `DispCall`,
+On any full-mode failure (Office missing, COM activation refused,
+document corrupted, …) the dispatcher silently falls back to the quick
+path so the user always gets *some* preview.
+
+Full-mode uses **OLE Automation via raw `IDispatch`** — no type library
+`#import`, no MFC. The thin helpers `DispGetId`, `DispCall`,
 `DispGetProperty`, `DispPutBool`, `DispPutI4`, `DispGetDispatchProperty`,
-`DispGetHwndProperty` wrap the `GetIDsOfNames` + `Invoke` dance.
-Word.Application is created on the first full-mode LOAD and *kept alive*
-across subsequent LOADs in the same session (matching the persistence of
-the preview handler). On mode switches (Word doc → non-Word file) we
-detach Word's window from `hwndRender` but keep the process around for
-possible reuse. On CLOSE we `Application.Quit` and release.
+`DispGetHwndProperty` wrap the `GetIDsOfNames` + `Invoke` dance, and are
+shared across all three apps.
 
-### Embedding Word's window
+**Only one Office app can be embedded at a time** — the render pane is a
+single embed point. Each `LoadXxxFullSta` calls `UnloadYyyFullSta(true)`
+on the other two apps before installing its own window. Within a Lister
+session, switches between files of the *same* app reuse the running
+Application instance (just close/open the document); switches across
+apps pay the cold-start cost again.
 
-Word does not materialise its main HWND until `Application.Visible = True`.
-The sequence is therefore:
+Per-app COM details:
 
-1. `CoCreateInstance(Word.Application, IID_IDispatch)` — process is up,
-   but no window exists yet.
-2. `DisplayAlerts = wdAlertsNone`, `Visible = False`.
-3. `Documents.Open(FileName, ConfirmConversions=False, ReadOnly=True,
-   AddToRecentFiles=False)`. IDispatch positional args are passed in
-   **reverse order**; we deliberately stop at the first four parameters
-   instead of trying to skip ahead to `Visible` (param 12), which would
-   require named-arg invocation.
-4. `Visible = True` — Word's main window now exists. There is an
-   unavoidable brief on-screen flash here.
-5. Locate the HWND. **`Application.Hwnd` is gone in modern Microsoft 365**
-   (`GetIDsOfNames` returns `DISP_E_UNKNOWNNAME`). We try the property
-   once for older Office, then fall back to `EnumWindows` looking for the
-   `OpusApp` class, filtered by a window-title substring (the document
-   filename) to disambiguate from any pre-existing Word instance the user
+| App        | ProgID                  | Collection      | Open call signature                                   | Frame class    |
+|------------|-------------------------|-----------------|-------------------------------------------------------|----------------|
+| Word       | `Word.Application`      | `Documents`     | `Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles)` | `OpusApp`      |
+| Excel      | `Excel.Application`     | `Workbooks`     | `Open(FileName, UpdateLinks, ReadOnly)`               | `XLMAIN`       |
+| PowerPoint | `PowerPoint.Application`| `Presentations` | `Open(FileName, ReadOnly, Untitled, WithWindow)`      | `PPTFrameClass`|
+
+`Application.Visible` can be `False` for Word and Excel (the window
+materialises only after we set it back to `True` for the reparent step).
+**PowerPoint rejects `Visible = False`**, so its main window is always on
+screen between `Presentations.Open` and our `SetParent` — accept the
+brief flash.
+
+`Document.Close` arguments differ:
+- Word: `Close(SaveChanges = wdDoNotSaveChanges = 0)` (Long enum)
+- Excel: `Close(SaveChanges = False)` (Variant Boolean)
+- PowerPoint: `Close()` no args, with `Presentation.Saved = True` set
+  beforehand to suppress the save prompt.
+
+On CLOSE (Lister shutdown) all three Unload functions run; each is a
+no-op if its slot is empty.
+
+### Embedding the app window
+
+For Word and Excel the main HWND does not materialise until
+`Application.Visible = True`. For PowerPoint the HWND exists from
+`CoCreateInstance` since `Visible = False` is not allowed. The embedding
+sequence (parameterised on the app) is:
+
+1. `CoCreateInstance(*.Application, IID_IDispatch)` — process is up.
+2. Suppress dialogs: Word/PowerPoint use a `DisplayAlerts` enum (Word
+   `wdAlertsNone = 0`, PowerPoint `ppAlertsNone = 1`); Excel uses a
+   Boolean `DisplayAlerts = False`.
+3. For Word and Excel only: `Visible = False`.
+4. `Documents.Open` / `Workbooks.Open` / `Presentations.Open` with the
+   per-app args listed above. `IDispatch::Invoke` takes positional args
+   in **reverse order**; we don't try to skip ahead to optional
+   parameters past the first few (that would require named-arg
+   invocation).
+5. For Word and Excel: set `Visible = True` so the main window
+   materialises. (PowerPoint is already visible.)
+6. Locate the HWND. **`Application.Hwnd` is gone in modern Microsoft
+   365** (`GetIDsOfNames` returns `DISP_E_UNKNOWNNAME`). We try the
+   property once for older Office, then fall back to `EnumWindows`
+   looking for the app's frame class (`OpusApp` / `XLMAIN` /
+   `PPTFrameClass`), filtered by a window-title substring (the document
+   filename) to disambiguate from any pre-existing instance the user
    may have running.
-6. `SetParent` into `hwndRender`, strip
+7. `EmbedOfficeWindowSta`: `SetParent` into `hwndRender`, strip
    `WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_BORDER|WS_POPUP|...`, add
    `WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN`, `SetWindowPos` with
    `SWP_FRAMECHANGED`.
+8. Store the HWND into the per-app slot (`hwndWordApp` /
+   `hwndExcelApp` / `hwndPptApp`).
 
-### Per-document preview tweaks
+### Per-document preview tweaks (Word only)
 
 After embedding, `ConfigureWordForPreviewSta` applies:
 
@@ -227,6 +264,42 @@ After embedding, `ConfigureWordForPreviewSta` applies:
 - `ActiveWindow.DisplayRulers = False`.
 - `Document.Protect(wdAllowOnlyReading)` — runtime read-only on top of
   the `ReadOnly=True` open flag.
+
+Excel: `ConfigureExcelForPreviewSta` sets `ActiveWindow.Zoom = 100`
+(a Long percentage). We previously tried `Zoom = True` (Excel's "Fit
+Selection" mode) but the resulting zoom depended on whatever range
+Excel chose to fit and was visually unpredictable. Excel has no
+auto-refit-on-resize equivalent of Word's `wdPageFitBestFit`.
+
+Excel embedding has a **known limitation**: once Excel's frame is
+embedded, the inner widgets (ribbon, `XLDESK`, sheet tabs, status
+bar) lay out **once** at the initial frame size and do not relayout
+on subsequent programmatic resizes. To make the initial layout match
+the Lister pane we set `Application.Width`/`Height` (in points) just
+before `Workbooks.Open` — Excel's frame size at workbook-open time is
+what its layout engine commits to. Lister resizes after that point
+adjust the Win32 frame (`SetWindowPos` in `ResizeOfficeFullSta`) but
+Excel keeps drawing into the original area. Attempted workarounds
+that did **not** work in our setup:
+
+- `Application.Width`/`Height` toggled on resize — no effect on
+  child widgets.
+- `Application.WindowState = xlMaximized` after embed — blanks the
+  ribbon area.
+- `ActiveWindow.WindowState = xlMaximized` (maximize workbook
+  inside the MDI client) — also blanks the ribbon and doesn't make
+  the workbook follow the frame.
+- Synthetic `WM_EXITSIZEMOVE` after `SetWindowPos` — Excel ignores it.
+- `SWP_FRAMECHANGED` / `SWP_NOSENDCHANGING` flags on `SetWindowPos`
+  — no effect.
+
+The user-facing workaround is to close and reopen the Lister at the
+desired size; that triggers a fresh `LoadExcelFullSta` which sets
+`Application.Width`/`Height` before the workbook opens.
+
+PowerPoint: `ConfigurePowerPointForPreviewSta` sets
+`ActiveWindow.View.ZoomToFit = msoTrue`. Unlike Excel, this *is*
+auto-refit: PowerPoint rescales the slide as the window changes size.
 
 **Strict rule: we touch no `Application`-level Word setting.** Office
 persists Application properties (status bar, ribbon state, default
@@ -243,8 +316,4 @@ scope.
   could be wired through to the host.
 - Persistent host process pooling — currently one host per Lister session.
   Reuse via `ListLoadNextW` is implemented; cross-session pooling is not.
-- Full embedded mode for Excel and PowerPoint via OLE Automation
-  (analogous to the existing Word path). PowerPoint cannot be made
-  invisible, so its embedding will need a different approach (start
-  with the window off-screen, then reparent).
 - Release workflow automation (GitHub Actions triggered by `v*` tags).

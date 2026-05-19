@@ -77,22 +77,23 @@ The plugin advertises support for the union of these extensions. If a
 specific handler is missing, the plugin shows the fallback information
 panel for that file instead of failing silently.
 
-> **Word documents render in Web Layout view by default.** All Office
-> Preview Handlers (Word, Excel, PowerPoint) use a simplified embedded
-> rendering pipeline optimised for speed and stability inside a host
+> **Quick previews use a simplified rendering pipeline.** Office's
+> built-in preview components — used by Windows Explorer's preview
+> pane and by this plugin in the default mode — render through a
+> reduced pipeline optimised for speed and stability inside a host
 > window, not the full editing UI. For Word this means a flowing Web
 > Layout without page breaks, headers or footers; Excel shows a
 > simplified grid; PowerPoint shows static slides without transitions.
-> **An opt-in Full mode** — which drives a real Word instance via OLE
-> Automation and renders documents in Print Layout view (with proper
-> pagination, headers and footers) — is available for Word; see
-> [Application Render Mode](#application-render-mode) below.
+> An opt-in **Full mode** that launches the real Word, Excel or
+> PowerPoint application and embeds its window into the Lister pane
+> is available; see [Application Render Mode](#application-render-mode)
+> below.
 
-> **MSG and VSDX caveat.** Recent Office / Outlook installs sometimes do
-> not register the shell Preview Handler for `.msg` or `.vsdx` — New
-> Outlook in particular drops the classic MAPI previewer. In those cases
-> Windows Explorer's own preview pane is empty too, and the plugin falls
-> back to the information panel.
+> **MSG and VSDX caveat.** Recent Office and Outlook installs sometimes
+> ship without preview support for `.msg` or `.vsdx` — the New Outlook
+> in particular has dropped the classic MSG preview. In those cases
+> Windows Explorer's own preview pane is empty too, and the plugin
+> falls back to the information panel.
 
 ### Configuration
 
@@ -144,53 +145,68 @@ FontSize=13
 
 #### Application Render Mode
 
-By default all previews use the **quick mode** — the Windows Preview
-Handler that Office registers. This is fast (~200–800 ms cold start),
-memory-light (~30–80 MB) and stable, but the rendering pipeline is
-simplified (Web Layout for Word, no transitions for PowerPoint, etc.).
+By default all previews use the **quick mode** — the built-in Office
+preview component that the plugin hosts inside the Lister pane. This
+is fast (~200–800 ms to first display), memory-light (~30–80 MB) and
+stable, but the rendering pipeline is simplified (Word in Web Layout
+without page breaks, Excel in a simplified grid, PowerPoint slides
+without transitions).
 
-Setting an application to `full` instead drives a real Office instance
-via OLE Automation and embeds its main window into the Lister pane.
-**Currently only `Word=full` is implemented**; the `Excel` and
-`PowerPoint` keys are reserved and behave as `quick`.
+Setting an application to `full` switches to a slower but visually
+faithful mode: the real Word, Excel or PowerPoint application is
+launched in the background, opens the file read-only, and its main
+window is embedded into the Lister pane. All three applications can
+be configured independently.
 
 ```ini
 [Mode]
 Word=full
-;Excel=quick
-;PowerPoint=quick
+Excel=full
+PowerPoint=full
 ```
 
-What full mode does in the preview pane:
+What full mode does for each application:
 
-- Switches the document to **Print Layout** view (page boundaries,
-  headers, footers, page numbers).
-- **Zooms to page width** (`wdPageFitBestFit`), re-fitting automatically
-  when the Lister pane is resized — handy in the narrow Quick View
-  [Ctrl+Q] pane.
-- Hides the rulers.
-- Enforces **read-only** via `Document.Protect(wdAllowOnlyReading)` on
-  top of the `ReadOnly=True` open flag, so typing in the document is
-  blocked and Ctrl+S has nothing to save.
+- **Word** — shows the document in Print Layout (page boundaries,
+  headers, footers, page numbers) with the page scaled to the Lister
+  pane width. The zoom re-fits automatically when you resize the
+  pane. Rulers are hidden and the preview is truly read-only (typing
+  in the document is blocked).
+- **Excel** — opens the workbook read-only with the zoom set to
+  100%. Excel's initial layout fills the Lister pane on load.
+  **Known limit:** Excel does not relayout when the Lister pane is
+  later resized — the content stays anchored to its initial area.
+  Close the Lister (Esc) and reopen it with F3/Ctrl+Q to get a
+  fresh layout at the new pane size.
+- **PowerPoint** — opens the presentation read-only with the slide
+  scaled to fit the Lister pane. The zoom re-fits automatically when
+  you resize the pane. PowerPoint's main window appears on screen for
+  a fraction of a second before being embedded into the Lister (a
+  brief visible flash); Word and Excel embed silently.
 
 Full mode tradeoffs to be aware of:
 
-- **Cold start ~2–4 s** the first time a Word document is previewed in
-  a Lister session. Subsequent Word documents in the same session reuse
-  the running Word instance and load in ~0.5–1 s.
-- **Memory ~100–300 MB** per running Word instance.
-- **Requires a full Microsoft Office installation** (not just Office
-  Viewer, and not LibreOffice — only Word's COM server is supported).
-- **Falls back to quick mode** on any failure (Office missing, COM
-  activation refused, document corrupted, …), so you always get
+- **Cold start ~2–4 s** the first time an Office document of a given
+  application is opened. Subsequent documents of the *same*
+  application within the *same* Lister window load faster (~0.5–1 s)
+  because the running Office instance is reused. Switching between
+  file types (`.docx` → `.xlsx`) quits the previous application and
+  spins up the next one, so that switch pays the cold-start cost
+  again.
+- **Only one application embedded at a time.** The Lister pane is a
+  single embed point — you cannot have a Word document and an Excel
+  workbook visible in the same Lister.
+- **Memory ~100–300 MB** per running Office instance.
+- **Requires a full Microsoft Office installation** of the relevant
+  application — not Office Viewer, not LibreOffice.
+- **Falls back to quick mode** automatically on any failure (Office
+  missing, document password-protected, …), so you always get
   *some* preview.
-- **Does not modify any global Word setting.** The plugin only touches
-  state scoped to the active window, view or document — never
-  `Application`-level properties like the status-bar visibility or
-  the ribbon state, because Office would persist those into your
-  user profile and change how your standalone Word starts up.
-  Concretely this means the Word ribbon stays visible in the preview;
-  the cost of hiding it would be hijacking your global Word settings.
+- **No global Office settings are changed.** Full mode only touches
+  settings scoped to the open preview window — your standalone Word,
+  Excel and PowerPoint will start up exactly as you left them. The
+  ribbon, for example, stays visible in the preview because hiding
+  it would hijack your global Office settings.
 
 ### When MS Office Is Not Installed
 
