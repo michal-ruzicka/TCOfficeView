@@ -8,6 +8,12 @@ on:
   push:
   pull_request:
 
+# Restrict the GITHUB_TOKEN to the minimum required — read-only checkout.
+# The workflow does not publish releases or open PRs, so no write access
+# is needed.
+permissions:
+  contents: read
+
 # Cancel any in-progress run for the same ref so a fast-follow push does
 # not queue up behind a stale one.
 concurrency:
