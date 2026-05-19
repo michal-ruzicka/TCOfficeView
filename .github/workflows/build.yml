@@ -21,13 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # Set up the MSVC compiler environment (cl.exe, link.exe, …) for the
-      # latest Visual Studio version present on the runner.
-      - name: Set up MSVC environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-
       # build.cmd drives CMake for both x86 and x64, stages the artifacts,
       # and creates dist\TCOfficeView.v<version>.zip.
+      # No MSVC setup action needed: build.cmd only calls cmake, which
+      # locates Visual Studio via vswhere and invokes it internally.
       - name: Build (x86 + x64)
         shell: cmd
         run: build.cmd
