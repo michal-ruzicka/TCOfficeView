@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   persists those into the user's profile on Quit. Only per-window /
   per-document settings are touched, so your standalone Word, Excel
   and PowerPoint will start up exactly as you left them.
+- Every Office process spawned by the plugin is assigned to a Job
+  Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. When the host
+  process exits for any reason (clean shutdown, plugin-side
+  `TerminateProcess` after the host failed to honour `CLOSE` within
+  2 seconds, Windows shutdown), the kernel kills any still-alive
+  Office processes with it — so Excel in particular can no longer
+  be left orphaned and reported as a "hung application" at the next
+  system restart.
 
 ## [1.0.0] – 2026-05-18
 

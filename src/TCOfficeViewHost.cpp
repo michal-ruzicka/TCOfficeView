@@ -252,6 +252,15 @@ struct HostState
     IDispatch*          pExcelApp       = nullptr;
     IDispatch*          pExcelWb        = nullptr;
     HWND                hwndExcelApp    = nullptr;        // Excel main window reparented into hwndRender
+    // Job Object that owns the Office processes we spawn via COM. With
+    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE set, the kernel kills every
+    // process in the job the moment its last handle (ours, here)
+    // closes — so however this host process dies (clean WM_HOST_CLOSE,
+    // TerminateProcess from the plugin DLL, Windows shutdown), the
+    // Excel / Word / PowerPoint instances we created go with it
+    // instead of being left orphaned.
+    HANDLE              hOfficeJob      = nullptr;
+
     IDispatch*          pPptApp         = nullptr;
     IDispatch*          pPptPres        = nullptr;
     HWND                hwndPptApp      = nullptr;        // PowerPoint main window reparented into hwndRender
@@ -1069,6 +1078,35 @@ static bool EmbedOfficeWindowSta(HWND hwndApp)
     return true;
 }
 
+// Add an Office process (Word / Excel / PowerPoint) to our kill-on-close
+// Job Object, so that whenever this host dies the Office instance dies
+// with it. Idempotent: re-assigning a process that is already a member
+// of the job is a no-op (AssignProcessToJobObject returns FALSE but
+// that's fine — we just log and move on). On modern Windows (8+) nested
+// jobs work transparently, so even if the Office process was placed in
+// some other job by the shell, our job's KILL_ON_JOB_CLOSE still fires.
+static void AssignOfficeProcessToJobSta(HWND hwndOfficeApp)
+{
+    if (!g_state.hOfficeJob || !hwndOfficeApp) return;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwndOfficeApp, &pid);
+    if (!pid) return;
+
+    HANDLE hProc = OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA,
+                               FALSE, pid);
+    if (!hProc)
+    {
+        HostLog(L"  AssignOfficeProcessToJob: OpenProcess(pid=%lu) failed err=%lu",
+                pid, GetLastError());
+        return;
+    }
+    BOOL ok = AssignProcessToJobObject(g_state.hOfficeJob, hProc);
+    HostLog(L"  AssignProcessToJobObject(pid=%lu) -> %s (err=%lu)",
+            pid, ok ? L"OK" : L"FAIL",
+            ok ? 0UL : GetLastError());
+    CloseHandle(hProc);
+}
+
 static HRESULT LoadWordFullSta(LPCWSTR path)
 {
     HostLog(L"LoadWordFullSta: path='%s'", path);
@@ -1199,6 +1237,7 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
         return E_FAIL;
     }
     g_state.hwndWordApp = hwndWord;
+    AssignOfficeProcessToJobSta(hwndWord);
 
     // Apply preview-friendly tweaks: Print Layout view, read-only
     // protection, hidden status bar / rulers.
@@ -1371,6 +1410,7 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
         return E_FAIL;
     }
     g_state.hwndExcelApp = hwndExcel;
+    AssignOfficeProcessToJobSta(hwndExcel);
 
     ConfigureExcelForPreviewSta();
 
@@ -1531,6 +1571,7 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
         return E_FAIL;
     }
     g_state.hwndPptApp = hwndPpt;
+    AssignOfficeProcessToJobSta(hwndPpt);
 
     ConfigurePowerPointForPreviewSta();
 
@@ -2005,6 +2046,35 @@ int wmain(int argc, wchar_t** argv)
     HostLog(L"  CoInitializeEx -> 0x%08lX", static_cast<long>(hr));
     if (FAILED(hr))
         return 2;
+
+    // Job Object that owns any Office processes we spawn (see the
+    // AssignOfficeProcessToJobSta calls in the per-app loaders). Set up
+    // KILL_ON_JOB_CLOSE so that when this host process dies — through
+    // any mechanism, including being killed during Windows shutdown —
+    // the kernel terminates the Office processes too. Without this
+    // safety net Excel in particular tends to get left as an orphan
+    // and the system reports a "hung application" on restart.
+    g_state.hOfficeJob = CreateJobObjectW(nullptr, nullptr);
+    if (g_state.hOfficeJob)
+    {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = {};
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(g_state.hOfficeJob,
+                                     JobObjectExtendedLimitInformation,
+                                     &info, sizeof(info)))
+        {
+            HostLog(L"  SetInformationJobObject failed err=%lu — closing job",
+                    GetLastError());
+            CloseHandle(g_state.hOfficeJob);
+            g_state.hOfficeJob = nullptr;
+        }
+    }
+    else
+    {
+        HostLog(L"  CreateJobObject failed err=%lu — Office processes will not be auto-killed",
+                GetLastError());
+    }
 
     // Pipe was created by the plugin with FILE_FLAG_OVERLAPPED. Open the
     // client end with the matching flag.

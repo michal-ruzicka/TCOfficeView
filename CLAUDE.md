@@ -221,6 +221,28 @@ brief flash.
 On CLOSE (Lister shutdown) all three Unload functions run; each is a
 no-op if its slot is empty.
 
+### Office process lifetime
+
+Office processes (Word / Excel / PowerPoint) spawned via COM
+(`CLSCTX_LOCAL_SERVER`) normally exit on their own once the last
+client COM reference is released, but that signal can get lost when
+the host dies abruptly (plugin-side `TerminateProcess` after a
+hanging Quit, Windows shutdown, host crash). To make the lifetime
+deterministic, the host creates a Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in `wmain` and assigns each
+Office process to it right after `EmbedOfficeWindowSta` (via the
+HWND → `GetWindowThreadProcessId` → `OpenProcess` →
+`AssignProcessToJobObject` sequence). When the host process exits
+through *any* path, the kernel closes the Job handle and the
+`KILL_ON_JOB_CLOSE` flag terminates every assigned Office process.
+
+The Job handle is intentionally **not** closed in `wmain`'s cleanup
+code: closing it triggers the kill immediately, which would race
+the `Application.Quit` calls in `UnloadXxxFullSta`. Letting the OS
+close it on process exit means the clean-quit path gets a chance
+to finish first and the Job is only the safety net for unclean
+exits.
+
 ### Embedding the app window
 
 For Word and Excel the main HWND does not materialise until
