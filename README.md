@@ -165,6 +165,15 @@ Excel=full
 PowerPoint=full
 ```
 
+A small **mode-switch button** in the top-right of every Word /
+Excel / PowerPoint preview lets you flip the current preview between
+quick and full on demand — useful when you want a quick glance at one
+file in full mode without changing your default, or vice versa. The
+switch only affects the currently displayed file; selecting another
+file (or re-opening the same one) goes back to your INI default. The
+button is hidden for file types that have no full-mode equivalent
+(`.msg`, `.vsdx`).
+
 What full mode does for each application:
 
 - **Word** — shows the document in Print Layout (page boundaries,

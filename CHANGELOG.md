@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one full-mode application can be embedded at a time — switching
   to a file of a different application type quits the previously
   loaded one.
+- **Mode-switch overlay button** in the top-right of every Word /
+  Excel / PowerPoint preview that toggles the current preview between
+  quick and full mode. The switch is non-sticky — it affects only the
+  currently displayed file; opening another file (or the same file
+  again) starts at the INI-configured default. Button size and font
+  scale with the monitor's DPI. The button is hidden for file types
+  that don't have a full-mode handler (e.g. `.msg`, `.vsdx`).
 - Per-app preview niceties in full mode:
   - **Word** — Print Layout view, page-width zoom that auto-refits
     on Lister resize, rulers hidden, runtime read-only enforcement
@@ -85,6 +92,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Changed to `&cmdLine[0]`, which is writable in all C++ versions.
 - **Missing null check in `ListLoadNextW`.** Added an explicit guard against
   a `nullptr` `FileToLoad` argument.
+- **Re-entrancy crash when switching modes rapidly (PowerPoint).** The retry
+  loops inside `LoadWordFullSta`, `LoadExcelFullSta` and
+  `LoadPowerPointFullSta` contained `PeekMessage` dispatch loops that pumped
+  the STA message queue. While a load was still in progress, a second
+  `WM_HOST_SWITCH_MODE` message could be dispatched recursively, causing
+  re-entrant COM calls and eventual heap corruption or access violation. The
+  `PeekMessage` loops have been replaced with plain `Sleep`, and a
+  `loadingInProgress` guard now serialises `LoadFileWithModeSta` calls so
+  that a second switch is deferred until the first one finishes.
+- **Document not closed before quick-mode fallback detach.** When full-mode
+  loading failed and the host fell back to quick mode, the Office document
+  was left open in the background while the window was detached. The
+  appropriate close routine (`CloseWordDocumentSta`,
+  `CloseExcelWorkbookSta`, `ClosePptPresentationSta`) is now called before
+  detaching the window in the fallback path.
+- **Crash when clicking the embedded Office window's close button.**
+  `EmbedOfficeWindowSta` strips Win32 caption styles, but Office apps
+  (Word, Excel, PowerPoint) render their own close button inside the
+  ribbon / title bar. Clicking it sent `WM_SYSCOMMAND(SC_CLOSE)` or
+  `WM_CLOSE` to the embedded HWND, which caused the Office app to destroy
+  its own window while it was still a child of our render pane — leading
+  to a crash or unexpected TC window closure. `SetWindowSubclass` cannot
+  be used because Office runs out-of-process. Instead, a visible light
+  grey overlay bar (`hwndCloseGuard`) is created as a child of the render
+  pane, stretched across the full width and covering the top ~40 px
+  (HiDPI-scaled) where the Office ribbon / title bar lives. The guard is
+  forced to `HWND_TOP` so it sits above the Office window, painted with
+  `LTGRAY_BRUSH`, and returns `HTCLIENT` from `WM_NCHITTEST` so all mouse
+  clicks in that area are swallowed. This also blocks the context menu
+  that appears on a right-click in the title area. The guard is destroyed
+  when the Office window is detached or the render pane is torn down.
 
 ### Notes
 

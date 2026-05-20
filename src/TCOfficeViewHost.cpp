@@ -54,6 +54,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")      // UpdateLayeredWindow, SetLayeredWindowAttributes
 
 // ---------------------------------------------------------------------------
 // Runtime configuration (loaded from TCOfficeView.ini)
@@ -257,6 +258,29 @@ struct HostState
     IDispatch*          pExcelApp       = nullptr;
     IDispatch*          pExcelWb        = nullptr;
     HWND                hwndExcelApp    = nullptr;        // Excel main window reparented into hwndRender
+    // Mode-switch button (always-visible Win32 BUTTON in the top-right of
+    // the render pane). It lets the user temporarily flip the current
+    // preview between quick and full mode without changing the INI default.
+    // The switch is per-preview only — loading a different file or
+    // re-opening this one starts over at the INI-configured mode.
+    HWND                hwndModeButton  = nullptr;
+    HFONT               hModeButtonFont = nullptr;
+    std::wstring        currentFile;                    // last LOAD argument, for re-load on switch
+    AppKind             currentFileApp  = AppKind::Other;
+    Mode                currentLoadedMode = Mode::Quick;
+
+    // Guard against re-entrant LOAD/SWITCH_MODE while a previous load is
+    // still running. The retry loops inside LoadXxxFullSta pump messages
+    // (PeekMessage) so a second button click could otherwise recurse into
+    // LoadFileWithModeSta and corrupt COM state.
+    bool                loadingInProgress = false;
+
+    // Invisible overlay window that sits in the top-right corner of the
+    // render pane and swallows mouse clicks aimed at the Office app's own
+    // close button. Office windows run out-of-process, so SetWindowSubclass
+    // does not work on them; this guard window (a child of hwndRender in
+    // our own process) is the only reliable way to block the button.
+    HWND                hwndCloseGuard  = nullptr;
 
     // Job Object that owns the Office processes we spawn via COM. With
     // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE set, the kernel kills every
@@ -286,7 +310,12 @@ static HostState g_state;
 // to the WndProc handler, which is responsible for freeing.
 static constexpr UINT WM_HOST_LOAD   = WM_USER + 1;     // lParam = wchar_t* (heap, delete[])
 static constexpr UINT WM_HOST_RESIZE = WM_USER + 2;     // wParam = MAKELONG(w, h)
-static constexpr UINT WM_HOST_CLOSE  = WM_USER + 3;
+static constexpr UINT WM_HOST_CLOSE       = WM_USER + 3;
+static constexpr UINT WM_HOST_SWITCH_MODE = WM_USER + 4;     // user clicked the mode-switch button
+
+// Control ID for the mode-switch BUTTON child window of hwndRender —
+// referenced from RenderWndProc's WM_COMMAND handler.
+static constexpr UINT_PTR kModeButtonId   = 1001;
 
 // ---------------------------------------------------------------------------
 // Registry lookup
@@ -361,7 +390,22 @@ static const wchar_t* kRenderClassName = L"TCOfficeViewHostRender";
 
 static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_ERASEBKGND) return 1;        // preview handler paints
+    switch (msg)
+    {
+        case WM_ERASEBKGND:
+            return 1;                          // preview handler paints
+
+        case WM_COMMAND:
+            // Click on the mode-switch overlay button. Bounce it to the STA
+            // window so the actual mode flip runs on the COM apartment
+            // (LoadXxxFullSta calls IDispatch::Invoke on Word/Excel/PowerPoint).
+            if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == kModeButtonId)
+            {
+                PostMessageW(g_state.hwndSta, WM_HOST_SWITCH_MODE, 0, 0);
+                return 0;
+            }
+            break;
+    }
     return DefWindowProcW(hWnd, msg, wp, lp);
 }
 
@@ -377,6 +421,101 @@ static void EnsureRenderClass(HINSTANCE hInst)
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     RegisterClassW(&wc);
     registered = true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Mode-switch overlay button.
+//
+// A small Win32 BUTTON sits in the top-right of the render pane and toggles
+// the current preview between quick and full mode. The button is created
+// once with the render window and stays around for the host's lifetime;
+// its label and visibility are refreshed by UpdateModeButtonSta whenever
+// a new file is loaded or the pane is resized.
+//
+// The switch is intentionally non-sticky: the next LOAD on a different
+// file (or the same file in a fresh Lister session) goes back to the INI-
+// configured default. See LoadFileSta vs LoadFileWithModeSta.
+// ---------------------------------------------------------------------------
+
+static int ScaleForDpi(int sizeAt96Dpi, UINT dpi)
+{
+    if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
+    return MulDiv(sizeAt96Dpi, dpi, USER_DEFAULT_SCREEN_DPI);
+}
+
+static bool CreateModeButtonSta(HINSTANCE hInst)
+{
+    if (!g_state.hwndRender || g_state.hwndModeButton) return true;
+
+    UINT dpi = GetDpiForWindow(g_state.hwndRender);
+    int w = ScaleForDpi(64, dpi);
+    int h = ScaleForDpi(24, dpi);
+
+    g_state.hwndModeButton = CreateWindowExW(
+        0, L"BUTTON", L"",
+        WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON | BS_CENTER | BS_VCENTER,
+        0, 0, w, h,
+        g_state.hwndRender,
+        reinterpret_cast<HMENU>(kModeButtonId),
+        hInst, nullptr);
+    if (!g_state.hwndModeButton)
+    {
+        HostLog(L"CreateModeButtonSta: CreateWindowEx failed err=%lu",
+                GetLastError());
+        return false;
+    }
+
+    int fontHeight = -ScaleForDpi(9, dpi);       // ~9pt at the window's DPI
+    g_state.hModeButtonFont = CreateFontW(
+        fontHeight, 0, 0, 0,
+        FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    if (g_state.hModeButtonFont)
+        SendMessageW(g_state.hwndModeButton, WM_SETFONT,
+                     reinterpret_cast<WPARAM>(g_state.hModeButtonFont), TRUE);
+
+    // Stays hidden until UpdateModeButtonSta gets called from the first LOAD.
+    return true;
+}
+
+// Refreshes the mode-switch button. Called after every LOAD and every
+// resize. Hides the button when the current file type doesn't support
+// the alternative mode (i.e. when neither Word, Excel nor PowerPoint
+// recognise the extension — no quick→full switch makes sense for those).
+static void UpdateModeButtonSta()
+{
+    if (!g_state.hwndModeButton) return;
+
+    const AppKind app = g_state.currentFileApp;
+    const bool showable = (app == AppKind::Word
+                        || app == AppKind::Excel
+                        || app == AppKind::PowerPoint);
+    if (!showable || !g_state.hwndRender || !IsWindow(g_state.hwndRender))
+    {
+        ShowWindow(g_state.hwndModeButton, SW_HIDE);
+        return;
+    }
+
+    // The label tells the user what clicking will do — i.e. the *target*
+    // mode, not the current one.
+    LPCWSTR label = (g_state.currentLoadedMode == Mode::Quick) ? L"→ Full"
+                                                                : L"→ Quick";
+    SetWindowTextW(g_state.hwndModeButton, label);
+
+    UINT dpi = GetDpiForWindow(g_state.hwndRender);
+    int w   = ScaleForDpi(64, dpi);
+    int h   = ScaleForDpi(24, dpi);
+    int pad = ScaleForDpi(4,  dpi);
+
+    RECT rc; GetClientRect(g_state.hwndRender, &rc);
+    // Top-right corner of the render pane. HWND_TOP keeps the button above
+    // any sibling that the preview handler or Office reparented in.
+    SetWindowPos(g_state.hwndModeButton, HWND_TOP,
+                 (rc.right - rc.left) - w - pad, pad, w, h,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
 // Create our local render window and reparent it into the plugin's child
@@ -424,11 +563,20 @@ static bool CreateRenderWindowSta(HINSTANCE hInst)
                  SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
     g_state.hwndRender = hRender;
+
+    // Mode-switch overlay button — child of the render window, stays hidden
+    // until the first LOAD picks an AppKind that supports both modes.
+    CreateModeButtonSta(hInst);
+
     return true;
 }
 
+// Forward declaration — defined later in the close-guard section.
+static void DestroyCloseGuard();
+
 static void DestroyRenderWindowSta()
 {
+    DestroyCloseGuard();   // must go before hwndRender is destroyed
     if (g_state.hwndRender)
     {
         // Reparent back to HWND_MESSAGE before destroying — this severs the
@@ -437,6 +585,12 @@ static void DestroyRenderWindowSta()
         SetParent(g_state.hwndRender, HWND_MESSAGE);
         DestroyWindow(g_state.hwndRender);
         g_state.hwndRender = nullptr;
+    }
+    g_state.hwndModeButton = nullptr;            // was a child of hwndRender
+    if (g_state.hModeButtonFont)
+    {
+        DeleteObject(g_state.hModeButtonFont);
+        g_state.hModeButtonFont = nullptr;
     }
 }
 
@@ -893,6 +1047,7 @@ static void DetachWordWindowSta()
 {
     if (!g_state.hwndWordApp) return;
     ShowWindow(g_state.hwndWordApp, SW_HIDE);
+    DestroyCloseGuard();
     SetParent(g_state.hwndWordApp, nullptr);
     LONG_PTR style = GetWindowLongPtrW(g_state.hwndWordApp, GWL_STYLE);
     style &= ~WS_CHILD;
@@ -1055,6 +1210,116 @@ static void ConfigurePowerPointForPreviewSta()
     }
 }
 
+// ---------------------------------------------------------------------------
+// Close-guard overlay window.
+//
+// Office applications run out-of-process, so SetWindowSubclass (which only
+// works on HWNDs in the same process) cannot intercept messages on the
+// embedded Word / Excel / PowerPoint window. Instead we create a small,
+// invisible, transparent, hit-testable child window in our own process that
+// sits in the top-right corner of the render pane, directly over the area
+// where Office draws its own close button. Any click that lands on the guard
+// is swallowed; the Office window underneath never sees it.
+//
+// The guard is created once per full-mode embed and destroyed when the
+// Office window is detached or the render pane is torn down.
+// ---------------------------------------------------------------------------
+
+static const wchar_t* kGuardClassName = L"TCOfficeViewCloseGuard";
+
+static LRESULT CALLBACK GuardWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+        case WM_NCHITTEST:
+            // Return HTCLIENT so the guard window captures the mouse click.
+            // The window paints a light gray background, so the user sees
+            // the guard area but the click is swallowed.
+            return HTCLIENT;
+
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            // Fill with the same light gray as the class background brush
+            // so the guard area is clearly visible.
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(LTGRAY_BRUSH)));
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hWnd, msg, wp, lp);
+}
+
+static void EnsureGuardClass(HINSTANCE hInst)
+{
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc   = GuardWndProc;
+    wc.hInstance     = hInst;
+    wc.lpszClassName = kGuardClassName;
+    // Use a light gray brush so the guard is visible but not intrusive.
+    // We create the brush here and leak it — it lives for the process lifetime.
+    wc.hbrBackground = CreateSolidBrush(RGB(200, 200, 200));
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+static void DestroyCloseGuard();   // forward declaration
+
+static void CreateCloseGuard(HINSTANCE hInst)
+{
+    DestroyCloseGuard();   // idempotent
+    if (!g_state.hwndRender) return;
+
+    EnsureGuardClass(hInst);
+
+    UINT dpi = GetDpiForWindow(g_state.hwndRender);
+    if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
+    // Cover the full width of the render pane and the top ~40 px where the
+    // Office ribbon / title bar lives. This blocks both the close button
+    // and the context menu that appears on a right-click in the title area.
+    RECT rc;
+    GetClientRect(g_state.hwndRender, &rc);
+    int w = rc.right - rc.left;
+    int h = ScaleForDpi(40, dpi);
+    int x = 0;
+    int y = 0;
+
+    g_state.hwndCloseGuard = CreateWindowExW(
+        0,
+        kGuardClassName, L"",
+        WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE,
+        x, y, w, h,
+        g_state.hwndRender, nullptr, hInst, nullptr);
+
+    if (g_state.hwndCloseGuard)
+    {
+        // Force the guard to the top of the Z-order so it sits above the
+        // Office window that was just reparented into hwndRender.
+        SetWindowPos(g_state.hwndCloseGuard, HWND_TOP,
+                     0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        HostLog(L"CreateCloseGuard: created at (%d,%d) size=%dx%d", x, y, w, h);
+    }
+    else
+    {
+        HostLog(L"CreateCloseGuard: CreateWindowEx failed err=%lu", GetLastError());
+    }
+}
+
+static void DestroyCloseGuard()
+{
+    if (g_state.hwndCloseGuard)
+    {
+        DestroyWindow(g_state.hwndCloseGuard);
+        g_state.hwndCloseGuard = nullptr;
+    }
+}
+
 // Reparent an Office app's main HWND into our render window and strip its
 // decorations so it looks like an embedded preview pane instead of a
 // top-level frame. Caller stores the HWND in the appropriate HostState slot.
@@ -1076,6 +1341,14 @@ static bool EmbedOfficeWindowSta(HWND hwndApp)
         HostLog(L"  EmbedOfficeWindowSta: SetParent failed err=%lu", GetLastError());
         return false;
     }
+
+    // Create an invisible overlay that covers the Office app's own close
+    // button in the top-right corner. Office runs out-of-process, so
+    // SetWindowSubclass does not work on its HWND; the guard window (a
+    // child of our render pane in this process) is the only reliable way
+    // to block clicks on the button.
+    CreateCloseGuard(GetModuleHandleW(nullptr));
+
     RECT rc; GetClientRect(g_state.hwndRender, &rc);
     SetWindowPos(hwndApp, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
@@ -1210,16 +1483,13 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
         fname = fname ? fname + 1 : path;
         // Word can take a moment to create its top-level window after
         // Visible=True; retry the EnumWindows scan a few times.
+        // We deliberately do NOT pump messages here — PeekMessage would
+        // dispatch WM_HOST_SWITCH_MODE and recurse into LoadFileWithModeSta
+        // while we are still mid-load, corrupting COM state.
         for (int retry = 0; retry < 40 && !hwndWord; ++retry)
         {
             hwndWord = FindOfficeTopLevelWindow(L"OpusApp", fname);
             if (hwndWord) break;
-            MSG m;
-            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
-            {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
             Sleep(25);
         }
         HostLog(L"  FindOfficeTopLevelWindow(OpusApp '%s') = 0x%p",
@@ -1273,6 +1543,7 @@ static void DetachExcelWindowSta()
 {
     if (!g_state.hwndExcelApp) return;
     ShowWindow(g_state.hwndExcelApp, SW_HIDE);
+    DestroyCloseGuard();
     SetParent(g_state.hwndExcelApp, nullptr);
     LONG_PTR style = GetWindowLongPtrW(g_state.hwndExcelApp, GWL_STYLE);
     style &= ~WS_CHILD;
@@ -1387,12 +1658,6 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
         {
             hwndExcel = FindOfficeTopLevelWindow(L"XLMAIN", fname);
             if (hwndExcel) break;
-            MSG m;
-            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
-            {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
             Sleep(25);
         }
         HostLog(L"  FindOfficeTopLevelWindow(XLMAIN '%s') = 0x%p",
@@ -1443,6 +1708,7 @@ static void DetachPptWindowSta()
 {
     if (!g_state.hwndPptApp) return;
     ShowWindow(g_state.hwndPptApp, SW_HIDE);
+    DestroyCloseGuard();
     SetParent(g_state.hwndPptApp, nullptr);
     LONG_PTR style = GetWindowLongPtrW(g_state.hwndPptApp, GWL_STYLE);
     style &= ~WS_CHILD;
@@ -1547,12 +1813,6 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
         {
             hwndPpt = FindOfficeTopLevelWindow(L"PPTFrameClass", fname);
             if (hwndPpt) break;
-            MSG m;
-            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
-            {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
             Sleep(25);
         }
         HostLog(L"  FindOfficeTopLevelWindow(PPTFrameClass '%s') = 0x%p",
@@ -1761,13 +2021,31 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 // to quick mode so the user always gets *some* preview.
 // ---------------------------------------------------------------------------
 
-static HRESULT LoadFileSta(LPCWSTR path)
+// Refreshes the mode-switch button's label / position / visibility from
+// the current HostState. Forward-declared here because LoadFileWithModeSta
+// calls it before the implementation section further down.
+static void UpdateModeButtonSta();
+
+// Internal worker for LoadFileSta. Mode is supplied explicitly so the
+// user-initiated WM_HOST_SWITCH_MODE handler can force the opposite of
+// the INI-configured default for the current preview.
+static HRESULT LoadFileWithModeSta(LPCWSTR path, AppKind app, Mode mode)
 {
-    AppKind app  = ClassifyByExtension(path);
-    Mode    mode = SelectMode(app);
-    HostLog(L"LoadFileSta: app=%d mode=%s",
+    if (g_state.loadingInProgress)
+    {
+        HostLog(L"LoadFileWithModeSta: ignored — previous load still running");
+        return E_ABORT;
+    }
+    g_state.loadingInProgress = true;
+
+    g_state.currentFile       = path;
+    g_state.currentFileApp    = app;
+    g_state.currentLoadedMode = mode;
+    HostLog(L"LoadFileWithModeSta: app=%d mode=%s",
             static_cast<int>(app),
             mode == Mode::Full ? L"full" : L"quick");
+
+    HRESULT result = E_FAIL;
 
     if (mode == Mode::Full)
     {
@@ -1791,7 +2069,12 @@ static HRESULT LoadFileSta(LPCWSTR path)
 
         if (app == AppKind::Word || app == AppKind::Excel || app == AppKind::PowerPoint)
         {
-            if (SUCCEEDED(hr)) return S_OK;
+            if (SUCCEEDED(hr))
+            {
+                UpdateModeButtonSta();
+                g_state.loadingInProgress = false;
+                return S_OK;
+            }
             HostLog(L"  %s full-mode failed (0x%08lX) — falling back to quick",
                     appName, static_cast<long>(hr));
             // Hard-reset all three app slots so quick mode starts from a
@@ -1799,17 +2082,37 @@ static HRESULT LoadFileSta(LPCWSTR path)
             UnloadWordFullSta(true);
             UnloadExcelFullSta(true);
             UnloadPptFullSta(true);
+            // Failed full mode → actual loaded mode will be quick.
+            g_state.currentLoadedMode = Mode::Quick;
             // fall through to quick mode
         }
     }
 
     // Quick mode (or full-mode fallback path). If any Office app's window
     // is still parented under the render pane, detach it first.
-    if (g_state.hwndWordApp)  DetachWordWindowSta();
-    if (g_state.hwndExcelApp) DetachExcelWindowSta();
-    if (g_state.hwndPptApp)   DetachPptWindowSta();
+    // Detach alone is not enough — we must also close the document so the
+    // Office app does not hold a lock on the file. Otherwise a rapid
+    // quick→full→quick switch can leave the document open in the background
+    // and the next full-mode open may fail or behave unpredictably.
+    if (g_state.hwndWordApp)  { CloseWordDocumentSta(); DetachWordWindowSta(); }
+    if (g_state.hwndExcelApp) { CloseExcelWorkbookSta(); DetachExcelWindowSta(); }
+    if (g_state.hwndPptApp)   { ClosePptPresentationSta(); DetachPptWindowSta(); }
 
-    return LoadHandlerSta(path);
+    result = LoadHandlerSta(path);
+    UpdateModeButtonSta();
+    g_state.loadingInProgress = false;
+    return result;
+}
+
+// Public LoadFile entry point — uses the INI-configured mode. This is the
+// path taken by the WM_HOST_LOAD pipe command (one per file shown in the
+// Lister), so switching files always resets to the configured default and
+// the user's button click does not carry over.
+static HRESULT LoadFileSta(LPCWSTR path)
+{
+    AppKind app  = ClassifyByExtension(path);
+    Mode    mode = SelectMode(app);
+    return LoadFileWithModeSta(path, app, mode);
 }
 
 static void ResizeHandlerSta(int w, int h)
@@ -1830,6 +2133,17 @@ static void ResizeHandlerSta(int w, int h)
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     ResizeOfficeFullSta(w, h);
+    UpdateModeButtonSta();                       // reposition overlay button
+
+    // Keep the close-guard stretched across the full width of the render pane.
+    if (g_state.hwndCloseGuard)
+    {
+        UINT dpi = GetDpiForWindow(g_state.hwndRender);
+        int gh = ScaleForDpi(40, dpi);
+        SetWindowPos(g_state.hwndCloseGuard, HWND_TOP,
+                     0, 0, w, gh,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1866,6 +2180,34 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             int w = static_cast<int>(LOWORD(wp));
             int h = static_cast<int>(HIWORD(wp));
             ResizeHandlerSta(w, h);
+            return 0;
+        }
+        case WM_HOST_SWITCH_MODE:
+        {
+            // User clicked the mode-switch overlay. Re-load the current
+            // file in the opposite mode (this is per-preview only — the
+            // next LOAD command from the plugin DLL goes back to the
+            // INI-configured default via LoadFileSta).
+            if (g_state.currentFile.empty())
+            {
+                HostLog(L"WM_HOST_SWITCH_MODE: ignored (no file currently loaded)");
+                return 0;
+            }
+            Mode target = (g_state.currentLoadedMode == Mode::Quick)
+                            ? Mode::Full
+                            : Mode::Quick;
+            HostLog(L"WM_HOST_SWITCH_MODE: switching to %s",
+                    target == Mode::Full ? L"full" : L"quick");
+            // currentFile is owned by g_state; copy locally because
+            // LoadFileWithModeSta overwrites g_state.currentFile early on
+            // (which would invalidate the c_str() pointer mid-call).
+            std::wstring path = g_state.currentFile;
+            HRESULT hr = LoadFileWithModeSta(path.c_str(), g_state.currentFileApp, target);
+            if (FAILED(hr))
+            {
+                HostLog(L"WM_HOST_SWITCH_MODE: LoadFileWithModeSta failed hr=0x%08lX",
+                        static_cast<long>(hr));
+            }
             return 0;
         }
         case WM_HOST_CLOSE:
