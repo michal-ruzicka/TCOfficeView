@@ -45,6 +45,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     PowerPoint cannot be told to run invisibly; Word and Excel
     embed silently.
 
+### Changed
+
+- Moved the `AppKind` enum declaration before `HostState` so that
+  `HostState::currentFileApp` can be initialised at compile time without
+  relying on a forward-declaration hack.
+
+### Fixed
+
+- **Plugin deadlock on Lister close / TC exit.** `TerminateSession` used an
+  infinite timeout when writing `CLOSE` to the host pipe. If the host's pipe
+  reader thread had already died (e.g. access violation), the write would
+  block forever, freezing Total Commander. The write now uses a 3-second
+  timeout and cancels the pending I/O if it expires.
+- **Race condition in plugin `ChildWndProc` (use-after-free).** The resize
+  timer handler looked up the session under `g_sessionsMutex`, released the
+  lock, and then wrote to `session->hPipe`. Between releasing the lock and
+  the write, `ListCloseWindow` on another thread could erase and `delete`
+  the session. The mutex is now held for the entire pipe write.
+- **Race condition in host `HostLog` critical-section initialisation.**
+  `InitializeCriticalSection` was called lazily on the first `HostLog`
+  invocation without any synchronisation. Two threads (STA + pipe reader)
+  could race and initialise the same `CRITICAL_SECTION` twice, corrupting
+  it. The CS is now initialised once in `wmain` before the pipe reader
+  thread is created.
+- **Pipe buffer exhaustion after many file switches.** The host sends
+  `OK\n` / `ERR …\n` replies for every `LOAD` and `CLOSE`, but the plugin
+  never read them. After roughly 5 000 `ListLoadNextW` calls in a single
+  Lister session the 64 KB pipe buffer filled up and subsequent writes
+  blocked indefinitely. A background drain thread now continuously reads
+  and discards host responses.
+- **Handle leaks in the host process.** The log file handle, the logging
+  `CRITICAL_SECTION`, and the Office `JobObject` handle were never closed
+  or destroyed before process exit. They are now cleaned up in `wmain`
+  after the message loop terminates.
+- **Potential `CreateProcessW` command-line mutation.** `CreateProcessW`
+  requires a writable command-line buffer. `cmdLine.data()` returns
+  `const wchar_t*` in pre-C++17 standards, which is undefined behaviour.
+  Changed to `&cmdLine[0]`, which is writable in all C++ versions.
+- **Missing null check in `ListLoadNextW`.** Added an explicit guard against
+  a `nullptr` `FileToLoad` argument.
+
 ### Notes
 
 - Full mode deliberately changes no Office Application-wide settings
