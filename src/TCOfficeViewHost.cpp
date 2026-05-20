@@ -169,26 +169,25 @@ static void EnsureParentDir(const std::wstring& filePath)
 #define HOST_LOG_ENABLED 1
 
 #if HOST_LOG_ENABLED
+static HANDLE g_hLog = nullptr;
+static CRITICAL_SECTION g_logCs;
+
 static void HostLog(const wchar_t* fmt, ...)
 {
-    static HANDLE hLog = nullptr;
-    static CRITICAL_SECTION cs;
-    static bool csInit = false;
-    if (!csInit) { InitializeCriticalSection(&cs); csInit = true; }
-    EnterCriticalSection(&cs);
+    EnterCriticalSection(&g_logCs);
     if (g_logPath.empty())
     {
-        LeaveCriticalSection(&cs);
+        LeaveCriticalSection(&g_logCs);
         return;
     }
-    if (!hLog)
+    if (!g_hLog)
     {
         EnsureParentDir(g_logPath);
-        hLog = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        g_hLog = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
-    if (hLog && hLog != INVALID_HANDLE_VALUE)
+    if (g_hLog && g_hLog != INVALID_HANDLE_VALUE)
     {
         wchar_t prefix[64] = {};
         SYSTEMTIME st;
@@ -205,17 +204,17 @@ static void HostLog(const wchar_t* fmt, ...)
         va_end(ap);
 
         DWORD written = 0;
-        WriteFile(hLog, prefix,
+        WriteFile(g_hLog, prefix,
                   static_cast<DWORD>(wcslen(prefix) * sizeof(wchar_t)),
                   &written, nullptr);
-        WriteFile(hLog, body,
+        WriteFile(g_hLog, body,
                   static_cast<DWORD>(wcslen(body) * sizeof(wchar_t)),
                   &written, nullptr);
         static const wchar_t nl[] = L"\r\n";
-        WriteFile(hLog, nl, sizeof(nl) - sizeof(wchar_t), &written, nullptr);
-        FlushFileBuffers(hLog);
+        WriteFile(g_hLog, nl, sizeof(nl) - sizeof(wchar_t), &written, nullptr);
+        FlushFileBuffers(g_hLog);
     }
-    LeaveCriticalSection(&cs);
+    LeaveCriticalSection(&g_logCs);
 }
 #else
 static void HostLog(const wchar_t*, ...) {}
@@ -225,6 +224,12 @@ static void HostLog(const wchar_t*, ...) {}
 // HKCR\.<ext>\shellex\{8895b1c6-...} points to the handler's CLSID.
 static const GUID kPreviewHandlerCategory =
     { 0x8895b1c6, 0xb41f, 0x4c1c, { 0xa5, 0x62, 0x0d, 0x56, 0x42, 0x50, 0x83, 0x6f } };
+
+// ---------------------------------------------------------------------------
+// Application classification (must be declared before HostState).
+// ---------------------------------------------------------------------------
+
+enum class AppKind { Other, Word, Excel, PowerPoint };
 
 // ---------------------------------------------------------------------------
 // Process-wide state. Modified only from the STA thread.
@@ -252,6 +257,7 @@ struct HostState
     IDispatch*          pExcelApp       = nullptr;
     IDispatch*          pExcelWb        = nullptr;
     HWND                hwndExcelApp    = nullptr;        // Excel main window reparented into hwndRender
+
     // Job Object that owns the Office processes we spawn via COM. With
     // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE set, the kernel kills every
     // process in the job the moment its last handle (ours, here)
@@ -672,8 +678,6 @@ static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
 // ---------------------------------------------------------------------------
 // Application dispatch (extension → app → mode)
 // ---------------------------------------------------------------------------
-
-enum class AppKind { Other, Word, Excel, PowerPoint };
 
 static AppKind ClassifyByExtension(LPCWSTR path)
 {
@@ -2029,6 +2033,11 @@ static HWND CreateStaWindow(HINSTANCE hInst)
 
 int wmain(int argc, wchar_t** argv)
 {
+    // Initialize the logging critical section before any HostLog() call.
+    // This eliminates the TOCTOU race that existed when the CS was lazily
+    // initialised inside HostLog on the first call.
+    InitializeCriticalSection(&g_logCs);
+
     // Must run before the first HostLog() call so g_logPath is populated.
     LoadConfig();
 
@@ -2140,7 +2149,23 @@ int wmain(int argc, wchar_t** argv)
     DestroyWindow(g_state.hwndSta);
     g_state.hwndSta = nullptr;
 
+    // Clean up the Job Object handle so the kernel can release it.
+    if (g_state.hOfficeJob)
+    {
+        CloseHandle(g_state.hOfficeJob);
+        g_state.hOfficeJob = nullptr;
+    }
+
     CoUninitialize();
-    HostLog(L"wmain: exit");
+
+    // Close the log file handle and tear down the logging critical section.
+    // These are done after CoUninitialize because HostLog may still be called
+    // during COM cleanup (e.g. Release on Office objects).
+    if (g_hLog && g_hLog != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(g_hLog);
+        g_hLog = nullptr;
+    }
+    DeleteCriticalSection(&g_logCs);
     return 0;
 }
