@@ -331,12 +331,17 @@ static constexpr UINT WM_HOST_SWITCH_MODE = WM_USER + 4;     // user clicked the
 
 // Control ID for the mode-switch BUTTON child window of hwndRender —
 // referenced from RenderWndProc's WM_COMMAND handler.
-static constexpr UINT_PTR kModeButtonId       = 1001;
-// Timer ID used to re-raise the mode button to HWND_TOP after a resize.
-// Preview handlers and Office apps may asynchronously reposition their own
-// windows in response to a resize (via a posted internal message), burying
-// the button.  A short one-shot timer fires after the handler settles.
-static constexpr UINT_PTR kModeButtonZTimerId = 1002;
+static constexpr UINT_PTR kModeButtonId           = 1001;
+// One-shot timer: re-raise the mode button after a resize. Preview
+// handlers and Office apps may asynchronously reposition their windows
+// in response to SetRect / SetWindowPos, burying the button.
+static constexpr UINT_PTR kModeButtonZTimerId     = 1002;
+// Periodic timer (~100 ms): keeps the button above sibling windows for the
+// entire life of the render window.  Needed because preview handlers (Word
+// in particular) can call SetWindowPos on their own window — e.g. while
+// scrolling — without SWP_NOZORDER, which moves them above the button
+// without generating WM_SIZE on hwndRender.
+static constexpr UINT_PTR kModeButtonKeepTopTimerId = 1003;
 
 // ---------------------------------------------------------------------------
 // Registry lookup
@@ -442,8 +447,12 @@ static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_TIMER:
             if (wp == kModeButtonZTimerId)
             {
-                KillTimer(hWnd, kModeButtonZTimerId);
+                KillTimer(hWnd, kModeButtonZTimerId);   // one-shot
                 UpdateModeButtonSta();
+            }
+            else if (wp == kModeButtonKeepTopTimerId)
+            {
+                UpdateModeButtonSta();   // periodic — no KillTimer
             }
             break;
     }
@@ -614,6 +623,13 @@ static bool CreateRenderWindowSta(HINSTANCE hInst)
     // until the first LOAD picks an AppKind that supports both modes.
     CreateModeButtonSta(hInst);
 
+    // Periodic Z-order keep-alive: some preview handlers (Word in particular)
+    // call SetWindowPos on their own window during scrolling without
+    // SWP_NOZORDER, silently moving themselves above the mode button.
+    // WM_SIZE is never fired in that case, so the one-shot resize timer
+    // cannot catch it.  A low-frequency periodic timer handles it instead.
+    SetTimer(g_state.hwndRender, kModeButtonKeepTopTimerId, 100, nullptr);
+
     return true;
 }
 
@@ -625,8 +641,9 @@ static void DestroyRenderWindowSta()
     DestroyCloseGuard();   // must go before hwndRender is destroyed
     if (g_state.hwndRender)
     {
-        // Cancel any pending deferred Z-raise timer before the window dies.
+        // Cancel both timers before the window dies.
         KillTimer(g_state.hwndRender, kModeButtonZTimerId);
+        KillTimer(g_state.hwndRender, kModeButtonKeepTopTimerId);
         // Reparent back to HWND_MESSAGE before destroying — this severs the
         // cross-process link cleanly so TC's UI thread doesn't see a stale
         // child reference while we're tearing down.
