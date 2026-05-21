@@ -9,31 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Opt-in **full render mode** for Word, Excel and PowerPoint,
-  configured per application under a new `[Mode]` INI section
-  (`Word=full`, `Excel=full`, `PowerPoint=full`). When enabled for a
-  given application, the plugin launches a real Word / Excel /
-  PowerPoint instance in the background, opens the file read-only,
-  and embeds the application's main window into the Lister pane.
-  Documents then render exactly the way the real application draws
-  them — Word in Print Layout with proper pagination, headers and
-  footers; Excel in its real grid; PowerPoint with full slide
-  formatting — instead of through the simplified rendering pipeline
-  the Preview Handler uses. Cold start is slower (~2–4 s per
-  application) and memory use is higher (~100–300 MB per instance),
-  so the default remains `quick`. On any failure (missing Office,
-  password-protected document, COM activation refused, …) the
-  plugin transparently falls back to quick mode for that file. Only
-  one full-mode application can be embedded at a time — switching
-  to a file of a different application type quits the previously
-  loaded one.
+- **Full render mode** for Word, Excel and PowerPoint via a new
+  `[Mode]` INI section. Four values are accepted per application:
+  `quick` (Preview Handler, no button), `quick-switchable` (Preview
+  Handler with overlay button — **new default**), `full` (OLE
+  Automation, no button), `full-switchable` (OLE Automation with
+  overlay button). When a full-mode value is set, the plugin launches
+  a real Word / Excel / PowerPoint instance, opens the file
+  read-only, and embeds its window into the Lister pane, giving the
+  full Print Layout / grid / slide rendering instead of the
+  simplified Preview Handler pipeline. Cold start is ~2–4 s;
+  memory ~100–300 MB per instance. On any failure the plugin
+  transparently falls back to quick mode.
 - **Mode-switch overlay button** in the top-right of every Word /
-  Excel / PowerPoint preview that toggles the current preview between
-  quick and full mode. The switch is non-sticky — it affects only the
-  currently displayed file; opening another file (or the same file
-  again) starts at the INI-configured default. Button size and font
-  scale with the monitor's DPI. The button is hidden for file types
-  that don't have a full-mode handler (e.g. `.msg`, `.vsdx`).
+  Excel / PowerPoint preview (shown when the configured mode is
+  `quick-switchable` or `full-switchable`). One click toggles the
+  current preview between quick and full mode without changing the
+  INI default; the switch is per-preview only — the next file (or
+  re-opening the same one) starts at the configured default. Button
+  size and font scale with the monitor's DPI. Always hidden for file
+  types with no full-mode handler (`.msg`, `.vsdx`) regardless of
+  the setting.
 - Per-app preview niceties in full mode:
   - **Word** — Print Layout view, page-width zoom that auto-refits
     on Lister resize, rulers hidden, runtime read-only enforcement

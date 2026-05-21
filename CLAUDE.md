@@ -158,9 +158,10 @@ Sections currently honoured:
   family auto-picks Aptos Mono → Consolas → Cascadia Mono → Lucida
   Console → Courier New. Font is DPI-aware (`GetDpiForWindow` +
   `MulDiv`).
-- `[Mode] Word=` / `Excel=` / `PowerPoint=` — `quick` (default) selects
-  the Preview Handler path; `full` selects the OLE Automation path. All
-  three apps are implemented in full mode.
+- `[Mode] Word=` / `Excel=` / `PowerPoint=` — four values accepted:
+  `quick-switchable` (default), `quick`, `full-switchable`, `full`.
+  `BaseMode()` extracts the actual loader mode (Quick/Full);
+  `IsSwitchable()` says whether to show the overlay button.
 
 The fallback panel is a child `EDIT` control inside `hwndRender`,
 created on any failure from `FindPreviewHandlerClsid` /
@@ -172,36 +173,38 @@ panel is sized in `ResizeHandlerSta` and torn down in
 
 ## Mode dispatch (quick vs full)
 
+`Mode` has four values: `Quick`, `QuickSwitchable`, `Full`,
+`FullSwitchable`. `BaseMode(m)` returns `Quick` or `Full`; `IsSwitchable(m)`
+returns whether the mode-switch button should be shown.
+
 `LoadFileSta` is the top-level LOAD entry point. It classifies the file by
-extension into `AppKind { Other, Word, Excel, PowerPoint }`, looks up the
-matching `Mode` from `[Mode]`, and forwards to the internal worker
-`LoadFileWithModeSta(path, app, mode)` which actually performs the load
-and dispatches:
+extension into `AppKind { Other, Word, Excel, PowerPoint }`, reads the
+config via `SelectMode(app)` (which may return a Switchable value), and
+calls `LoadFileWithModeSta(path, app, BaseMode(cfg))`. The worker only
+ever receives `Quick` or `Full`.
+
+`LoadFileWithModeSta` dispatches:
 
 - `Mode::Full` + `AppKind::Word` → `LoadWordFullSta`
 - `Mode::Full` + `AppKind::Excel` → `LoadExcelFullSta`
 - `Mode::Full` + `AppKind::PowerPoint` → `LoadPowerPointFullSta`
 - Anything else → `LoadHandlerSta` (the original preview-handler path).
 
-On any full-mode failure (Office missing, COM activation refused,
-document corrupted, …) the dispatcher silently falls back to the quick
-path so the user always gets *some* preview.
+On any full-mode failure the dispatcher silently falls back to quick mode.
 
 `LoadFileWithModeSta` stores `currentFile`, `currentFileApp` and
-`currentLoadedMode` into `HostState`. These are used by:
+`currentLoadedMode` (`Quick` or `Full`) into `HostState`. These are used by:
 
-- the mode-switch overlay button (see below) to know what to re-load
-  in the opposite mode;
-- `UpdateModeButtonSta` to pick the correct label (`→ Full` /
-  `→ Quick`) and decide whether to show the button at all (hidden for
-  `AppKind::Other`).
+- the mode-switch overlay button to know what to re-load in the opposite mode;
+- `UpdateModeButtonSta` to pick the label (`→ Full` / `→ Quick`) and decide
+  visibility: `IsSwitchable(SelectMode(currentFileApp))` — hidden when the
+  configured mode is non-switchable or the file type is `Other`.
 
-The button's click handler in `RenderWndProc` posts
-`WM_HOST_SWITCH_MODE` to the STA window; the STA handler calls
+The button's click handler in `RenderWndProc` posts `WM_HOST_SWITCH_MODE`
+to the STA window; the STA handler calls
 `LoadFileWithModeSta(currentFile, currentFileApp, opposite-mode)`. The
 switch is per-preview only — the next LOAD command from the plugin DLL
-goes through `LoadFileSta` (the wrapper), which picks up the
-INI-configured default again.
+goes through `LoadFileSta`, which picks up the INI-configured default again.
 
 Full-mode uses **OLE Automation via raw `IDispatch`** — no type library
 `#import`, no MFC. The thin helpers `DispGetId`, `DispCall`,

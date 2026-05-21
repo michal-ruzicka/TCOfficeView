@@ -67,20 +67,34 @@
 // %LocalAppData%). See the shipped sample INI for the full key reference.
 // ---------------------------------------------------------------------------
 
-// Per-application render mode. "Quick" hosts the Windows Preview Handler
-// registered by Office (fast, low memory, web-layout rendering only).
-// "Full" drives a hidden Word/Excel/PowerPoint instance via OLE Automation
-// and reparents its main window into our render pane (slower, higher
-// memory, but gives the full editing-mode rendering — for Word that means
-// the page layout with headers, footers and page breaks).
-enum class Mode { Quick, Full };
+// Per-application render mode.
+//
+//   Quick          — Preview Handler only; mode-switch button hidden.
+//   QuickSwitchable— Preview Handler by default; button visible so the
+//                    user can flip to Full for a single preview.
+//   Full           — OLE Automation (real app) only; button hidden.
+//   FullSwitchable — OLE Automation by default; button visible so the
+//                    user can flip to Quick for a single preview.
+//
+// BaseMode() strips the Switchable suffix to get the actual loader mode.
+// IsSwitchable() tells whether the mode-switch button should be shown.
+enum class Mode { Quick, Full, QuickSwitchable, FullSwitchable };
+
+static Mode BaseMode(Mode m)
+{
+    return (m == Mode::Full || m == Mode::FullSwitchable) ? Mode::Full : Mode::Quick;
+}
+static bool IsSwitchable(Mode m)
+{
+    return m == Mode::QuickSwitchable || m == Mode::FullSwitchable;
+}
 
 static std::wstring g_logPath;       // empty → diagnostic logging is disabled
 static std::wstring g_fontFamily;    // empty → auto-pick from a fallback list
 static int          g_fontSize = 12;
-static Mode         g_modeWord       = Mode::Quick;
-static Mode         g_modeExcel      = Mode::Quick;
-static Mode         g_modePowerPoint = Mode::Quick;
+static Mode         g_modeWord       = Mode::QuickSwitchable;   // default: quick + button
+static Mode         g_modeExcel      = Mode::QuickSwitchable;
+static Mode         g_modePowerPoint = Mode::QuickSwitchable;
 
 static std::wstring ExpandEnv(LPCWSTR s)
 {
@@ -125,13 +139,15 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     auto readMode = [&buf, &iniPath](LPCWSTR key, Mode dflt) -> Mode {
         GetPrivateProfileStringW(L"Mode", key, L"",
                                  buf, ARRAYSIZE(buf), iniPath.c_str());
-        if (_wcsicmp(buf, L"full")  == 0) return Mode::Full;
-        if (_wcsicmp(buf, L"quick") == 0) return Mode::Quick;
+        if (_wcsicmp(buf, L"quick")            == 0) return Mode::Quick;
+        if (_wcsicmp(buf, L"quick-switchable") == 0) return Mode::QuickSwitchable;
+        if (_wcsicmp(buf, L"full")             == 0) return Mode::Full;
+        if (_wcsicmp(buf, L"full-switchable")  == 0) return Mode::FullSwitchable;
         return dflt;                          // empty or invalid → default
     };
-    g_modeWord       = readMode(L"Word",       Mode::Quick);
-    g_modeExcel      = readMode(L"Excel",      Mode::Quick);
-    g_modePowerPoint = readMode(L"PowerPoint", Mode::Quick);
+    g_modeWord       = readMode(L"Word",       Mode::QuickSwitchable);
+    g_modeExcel      = readMode(L"Excel",      Mode::QuickSwitchable);
+    g_modePowerPoint = readMode(L"PowerPoint", Mode::QuickSwitchable);
     return true;
 }
 
@@ -506,6 +522,10 @@ static bool CreateModeButtonSta(HINSTANCE hInst)
     return true;
 }
 
+// Forward-declared here because UpdateModeButtonSta calls it and
+// SelectMode's actual definition appears later in the file.
+static Mode SelectMode(AppKind app);
+
 // Refreshes the mode-switch button. Called after every LOAD and every
 // resize. Hides the button when the current file type doesn't support
 // the alternative mode (i.e. when neither Word, Excel nor PowerPoint
@@ -514,10 +534,11 @@ static void UpdateModeButtonSta()
 {
     if (!g_state.hwndModeButton) return;
 
-    const AppKind app = g_state.currentFileApp;
-    const bool showable = (app == AppKind::Word
-                        || app == AppKind::Excel
-                        || app == AppKind::PowerPoint);
+    // Show the button only when the INI-configured mode for this file's
+    // application type is one of the switchable variants.  Files whose
+    // type is Other (MSG, VSDX, …) return Mode::Quick from SelectMode,
+    // which is not switchable, so they naturally hide the button.
+    const bool showable = IsSwitchable(SelectMode(g_state.currentFileApp));
     if (!showable || !g_state.hwndRender || !IsWindow(g_state.hwndRender))
     {
         ShowWindow(g_state.hwndModeButton, SW_HIDE);
@@ -2141,9 +2162,9 @@ static HRESULT LoadFileWithModeSta(LPCWSTR path, AppKind app, Mode mode)
 // the user's button click does not carry over.
 static HRESULT LoadFileSta(LPCWSTR path)
 {
-    AppKind app  = ClassifyByExtension(path);
-    Mode    mode = SelectMode(app);
-    return LoadFileWithModeSta(path, app, mode);
+    AppKind app = ClassifyByExtension(path);
+    Mode    cfg = SelectMode(app);              // may include the Switchable suffix
+    return LoadFileWithModeSta(path, app, BaseMode(cfg));
 }
 
 static void ResizeHandlerSta(int w, int h)

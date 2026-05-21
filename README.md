@@ -145,34 +145,43 @@ FontSize=13
 
 #### Application Render Mode
 
-By default all previews use the **quick mode** — the built-in Office
-preview component that the plugin hosts inside the Lister pane. This
-is fast (~200–800 ms to first display), memory-light (~30–80 MB) and
-stable, but the rendering pipeline is simplified (Word in Web Layout
-without page breaks, Excel in a simplified grid, PowerPoint slides
-without transitions).
+Four values are accepted per application under `[Mode]`:
 
-Setting an application to `full` switches to a slower but visually
-faithful mode: the real Word, Excel or PowerPoint application is
-launched in the background, opens the file read-only, and its main
-window is embedded into the Lister pane. All three applications can
-be configured independently.
+| Value | Render engine | Mode-switch button |
+|---|---|---|
+| `quick-switchable` **(default)** | Preview Handler | shown (→ Full) |
+| `quick` | Preview Handler | hidden |
+| `full-switchable` | OLE Automation (real app) | shown (→ Quick) |
+| `full` | OLE Automation (real app) | hidden |
+
+The **quick** engine is the built-in Office preview component hosted
+inside the Lister pane. It is fast (~200–800 ms to first display) and
+memory-light (~30–80 MB), but the rendering pipeline is simplified
+(Word in Web Layout without page breaks, Excel in a simplified grid,
+PowerPoint slides without transitions).
+
+The **full** engine launches the real Word, Excel or PowerPoint
+application in the background, opens the file read-only, and embeds
+its main window into the Lister pane. It is slower (~2–4 s cold
+start, ~100–300 MB per instance) but renders documents exactly as the
+application would.
+
+All three applications can be configured independently:
 
 ```ini
 [Mode]
-Word=full
-Excel=full
-PowerPoint=full
+Word=quick-switchable
+Excel=quick-switchable
+PowerPoint=quick-switchable
 ```
 
-A small **mode-switch button** in the top-right of every Word /
-Excel / PowerPoint preview lets you flip the current preview between
-quick and full on demand — useful when you want a quick glance at one
-file in full mode without changing your default, or vice versa. The
-switch only affects the currently displayed file; selecting another
-file (or re-opening the same one) goes back to your INI default. The
-button is hidden for file types that have no full-mode equivalent
-(`.msg`, `.vsdx`).
+The **`-switchable` variants** show a persistent overlay button in the
+top-right corner of every Word / Excel / PowerPoint preview. One click
+flips the current preview to the other engine without changing your INI
+default. The switch is per-preview only — selecting another file (or
+re-opening the same one) returns to the configured default. The button
+is hidden for file types that have no full-mode equivalent (`.msg`,
+`.vsdx`) regardless of the setting.
 
 What full mode does for each application:
 
