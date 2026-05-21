@@ -310,6 +310,12 @@ struct HostState
     IDispatch*          pPptApp         = nullptr;
     IDispatch*          pPptPres        = nullptr;
     HWND                hwndPptApp      = nullptr;        // PowerPoint main window reparented into hwndRender
+    // True when CoCreateInstance(PowerPoint.Application) connected to a
+    // pre-existing PPT process rather than creating a new one (MULTIPLEUSE
+    // registration).  In that case we must NOT call Application.Quit (which
+    // would close all the user's open presentations) and must NOT assign the
+    // process to our kill-on-close job object.
+    bool                pPptAppIsShared = false;
 };
 
 static HostState g_state;
@@ -1788,9 +1794,15 @@ static void UnloadPptFullSta(bool quitApp)
     DetachPptWindowSta();
     if (quitApp && g_state.pPptApp)
     {
-        DispCall(g_state.pPptApp, L"Quit", DISPATCH_METHOD, nullptr, 0, nullptr);
+        if (!g_state.pPptAppIsShared)
+        {
+            // Only quit when we own the process; quitting a shared (pre-existing)
+            // instance would close all the user's open presentations.
+            DispCall(g_state.pPptApp, L"Quit", DISPATCH_METHOD, nullptr, 0, nullptr);
+        }
         g_state.pPptApp->Release();
         g_state.pPptApp = nullptr;
+        g_state.pPptAppIsShared = false;
     }
 }
 
@@ -1804,6 +1816,19 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
 
     if (!g_state.pPptApp)
     {
+        // Detect whether a PowerPoint process is already running before we
+        // call CoCreateInstance.  PowerPoint registers with REGCLS_MULTIPLEUSE,
+        // so if it is already running CoCreateInstance returns a proxy to the
+        // existing process rather than starting a new one.  In that case we
+        // must not call Application.Quit on unload (it would close all the
+        // user's open presentations) and must not assign the process to our
+        // kill-on-close job object.
+        const bool pptWasRunning =
+            (FindOfficeTopLevelWindow(L"PPTFrameClass", nullptr) != nullptr);
+        HostLog(L"  PowerPoint pre-existing instance: %s",
+                pptWasRunning ? L"yes (shared — will not Quit or assign to job)"
+                              : L"no (new process)");
+
         CLSID clsid;
         HRESULT hr = CLSIDFromProgID(L"PowerPoint.Application", &clsid);
         HostLog(L"  CLSIDFromProgID(PowerPoint.Application) -> 0x%08lX",
@@ -1825,6 +1850,7 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
         // between Presentations.Open and our reparent — accept the brief flash.
 
         g_state.pPptApp = pApp;
+        g_state.pPptAppIsShared = pptWasRunning;
     }
     else
     {
@@ -1900,7 +1926,11 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
         return E_FAIL;
     }
     g_state.hwndPptApp = hwndPpt;
-    AssignOfficeProcessToJobSta(hwndPpt);
+    // Only assign to the kill-on-close job when we own the process.
+    // For a shared (pre-existing) instance assigning it would kill all
+    // the user's open presentations when the host exits.
+    if (!g_state.pPptAppIsShared)
+        AssignOfficeProcessToJobSta(hwndPpt);
 
     ConfigurePowerPointForPreviewSta();
 
