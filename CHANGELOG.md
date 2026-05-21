@@ -56,6 +56,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Preview handlers were activated in-process, which violates the
+  `IPreviewHandler` contract.**  `LoadHandlerSta` used
+  `CLSCTX_LOCAL_SERVER | CLSCTX_INPROC_SERVER`, so COM happily loaded any
+  handler that registered an `InProcServer32` (the Windows built-in MAPI
+  Mail Previewer for `.msg`, in particular) directly into our process.
+  Such handlers complete activation, initialisation and `SetWindow`, then
+  fail `DoPreview` with `E_FAIL` because Microsoft's `IPreviewHandler`
+  documentation states a handler must be hosted in its own background
+  process.  Activation is now `CLSCTX_LOCAL_SERVER` only, matching the
+  reference preview-host sample and Windows Explorer's preview pane —
+  COM now routes through the AppID's `DllSurrogate` (typically
+  `prevhost.exe`), and MSG previews finally render.
+- **`CoInitializeSecurity` is now established at host start-up.**  Handlers
+  that run in Windows' low-integrity `prevhost.exe` surrogate (notably the
+  Outlook MSG preview handler) need an explicit process-wide COM security
+  blanket to perform cross-process calls back to the host; without it
+  `DoPreview` returns `E_FAIL`.  The new call matches the settings used by
+  Windows Explorer's own preview pane (`RPC_C_AUTHN_LEVEL_DEFAULT`,
+  `RPC_C_IMP_LEVEL_IMPERSONATE`).
+- **Preview handlers requiring an `IPreviewHandlerFrame` site failed `DoPreview`.**
+  Outlook's MSG preview handler (and other handlers hosted in `prevhost.exe`)
+  ask the host for `IPreviewHandlerFrame` and `IOleWindow` via a site object
+  installed through `IObjectWithSite::SetSite`; without it `DoPreview` returns
+  `E_FAIL` and the preview never renders.  A new `PreviewHostSite` class
+  implements `IPreviewHandlerFrame` (no-op accelerator translation),
+  `IServiceProvider` (routing `IPreviewHandlerFrame` / `IOleWindow` lookups
+  back to itself) and `IOleWindow` (returning the render window's HWND).
+  The site is installed before any `IInitializeWith*::Initialize` call —
+  Outlook's MSG handler queries the site from inside `Initialize` and aborts
+  the load if it isn't ready yet — and cleared again on unload.  The call
+  order in `LoadHandlerSta` now matches Microsoft's recommended sequence:
+  CoCreateInstance → QI IPreviewHandler → SetSite → Initialize → SetWindow
+  → DoPreview.
+- **Preview handlers initialised only via `IInitializeWithItem` could not load.**
+  `LoadHandlerSta` previously tried only `IInitializeWithFile` and
+  `IInitializeWithStream`.  Outlook's MSG preview handler rejects both
+  (`E_NOINTERFACE`) and supports exclusively the modern Shell-item-based
+  `IInitializeWithItem`, which the loader now tries as a third fallback
+  (`SHCreateItemFromParsingName` → `IInitializeWithItem::Initialize`).
+- **Preview handlers missed when registered outside the direct extension key.**
+  `FindPreviewHandlerClsid` previously looked for the preview handler CLSID
+  only directly on the extension key and via the extension's default ProgID.
+  This missed handlers registered in any of the other places Windows
+  Explorer's preview pane consults — notably the MSG handler, which Outlook
+  registers under a versioned ProgID in `HKCR\.msg\OpenWithProgids`
+  (e.g. `Outlook.File.msg.16`) rather than as the default ProgID. The
+  lookup now follows the full Shell association chain that Explorer uses:
+  direct shellex key → default ProgID → each ProgID in `OpenWithProgids` →
+  `HKCR\SystemFileAssociations\<ext>` → `HKCR\SystemFileAssociations\<PerceivedType>`.
+  MSG and similar previews now work on systems where Windows Explorer already
+  shows them.
 - **Plugin deadlock on Lister close / TC exit.** `TerminateSession` used an
   infinite timeout when writing `CLOSE` to the host pipe. If the host's pipe
   reader thread had already died (e.g. access violation), the write would

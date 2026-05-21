@@ -89,11 +89,11 @@ panel for that file instead of failing silently.
 > is available; see [Application Render Mode](#application-render-mode)
 > below.
 
-> **MSG and VSDX caveat.** Recent Office and Outlook installs sometimes
-> ship without preview support for `.msg` or `.vsdx` — the New Outlook
-> in particular has dropped the classic MSG preview. In those cases
-> Windows Explorer's own preview pane is empty too, and the plugin
-> falls back to the information panel.
+> **MSG and VSDX caveat.** The New Outlook (the modern rewrite) has
+> dropped the classic `.msg` preview handler, and recent Visio installs
+> sometimes omit the `.vsdx` handler. If Windows Explorer's own preview
+> pane is also empty for a given file, the plugin falls back to the
+> information panel.
 
 ### Configuration
 

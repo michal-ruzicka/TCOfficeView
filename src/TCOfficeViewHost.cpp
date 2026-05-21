@@ -42,7 +42,9 @@
 #include <shobjidl.h>
 #include <shlwapi.h>
 #include <shlobj.h>           // SHCreateDirectoryExW
-#include <propsys.h>          // IInitializeWithFile, IInitializeWithStream
+#include <propsys.h>          // IInitializeWithFile, IInitializeWithStream, IInitializeWithItem
+#include <ocidl.h>            // IObjectWithSite
+#include <servprov.h>         // IServiceProvider
 #include <objbase.h>
 #include <oleauto.h>          // IDispatch helpers: SysAllocString, VARIANT, ...
 #include <stdio.h>
@@ -382,36 +384,109 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
     LPCWSTR dot = wcsrchr(path, L'.');
     if (!dot || !dot[1]) return E_INVALIDARG;
 
-    std::wstring ext = dot;                              // e.g. ".docx"
-    std::wstring catGuid = GuidToBraces(kPreviewHandlerCategory);
+    const std::wstring ext     = dot;          // e.g. ".msg"
+    const std::wstring catGuid = GuidToBraces(kPreviewHandlerCategory);
+    std::wstring       clsidStr;
 
-    std::wstring sub = ext + L"\\shellex\\" + catGuid;
-    std::wstring clsidStr;
-    bool foundDirect = ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr);
-    HostLog(L"FindPreviewHandlerClsid: ext='%s' direct=%s value='%s'",
-            ext.c_str(),
-            foundDirect ? L"yes" : L"no",
-            clsidStr.c_str());
+    // Step 1 — shellex key directly on the extension.
+    {
+        const std::wstring sub = ext + L"\\shellex\\" + catGuid;
+        if (ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
+        {
+            HostLog(L"FindPreviewHandlerClsid: '%s' found via direct shellex", ext.c_str());
+            return CLSIDFromString(clsidStr.c_str(), out);
+        }
+    }
 
-    if (!foundDirect)
+    // Step 2 — shellex on the extension's default ProgID.
     {
         std::wstring progId;
-        if (!ReadDefaultString(HKEY_CLASSES_ROOT, ext.c_str(), progId) || progId.empty())
+        if (ReadDefaultString(HKEY_CLASSES_ROOT, ext.c_str(), progId) && !progId.empty())
         {
-            HostLog(L"FindPreviewHandlerClsid: no ProgID for '%s'", ext.c_str());
-            return REGDB_E_CLASSNOTREG;
+            const std::wstring sub = progId + L"\\shellex\\" + catGuid;
+            if (ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
+            {
+                HostLog(L"FindPreviewHandlerClsid: '%s' found via ProgID '%s'",
+                        ext.c_str(), progId.c_str());
+                return CLSIDFromString(clsidStr.c_str(), out);
+            }
         }
-        sub = progId + L"\\shellex\\" + catGuid;
-        if (!ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
-        {
-            HostLog(L"FindPreviewHandlerClsid: progId='%s' has no preview handler",
-                    progId.c_str());
-            return REGDB_E_CLASSNOTREG;
-        }
-        HostLog(L"FindPreviewHandlerClsid: progId='%s' value='%s'",
-                progId.c_str(), clsidStr.c_str());
     }
-    return CLSIDFromString(clsidStr.c_str(), out);
+
+    // Step 3 — shellex on each ProgID listed under OpenWithProgids.
+    //
+    // Outlook registers its MSG preview handler only under one of the
+    // versioned ProgIDs in this subkey (e.g. Outlook.File.msg.16), not as
+    // the default ProgID of ".msg" — so Steps 1 and 2 miss it.
+    {
+        const std::wstring owpPath = ext + L"\\OpenWithProgids";
+        HKEY hOwp = nullptr;
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, owpPath.c_str(), 0, KEY_READ, &hOwp)
+                == ERROR_SUCCESS)
+        {
+            wchar_t name[512] = {};
+            DWORD   nameLen   = ARRAYSIZE(name);
+            for (DWORD idx = 0;
+                 RegEnumValueW(hOwp, idx, name, &nameLen,
+                               nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+                 ++idx, nameLen = ARRAYSIZE(name))
+            {
+                if (!name[0]) continue;
+                const std::wstring sub = std::wstring(name) + L"\\shellex\\" + catGuid;
+                if (ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
+                {
+                    RegCloseKey(hOwp);
+                    HostLog(L"FindPreviewHandlerClsid: '%s' found via OpenWithProgids '%s'",
+                            ext.c_str(), name);
+                    return CLSIDFromString(clsidStr.c_str(), out);
+                }
+            }
+            RegCloseKey(hOwp);
+        }
+    }
+
+    // Step 4 — system-level association on the extension itself.
+    //
+    // HKCR\SystemFileAssociations\<ext> is where Windows places system-wide
+    // shell extensions that should apply to every program registered for a
+    // given extension.  Some installs (e.g. modern Outlook for MSG) only
+    // register the preview handler here.
+    {
+        const std::wstring sub = L"SystemFileAssociations\\" + ext
+                               + L"\\shellex\\" + catGuid;
+        if (ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
+        {
+            HostLog(L"FindPreviewHandlerClsid: '%s' found via SystemFileAssociations\\<ext>",
+                    ext.c_str());
+            return CLSIDFromString(clsidStr.c_str(), out);
+        }
+    }
+
+    // Step 5 — system-level association on the extension's PerceivedType.
+    //
+    // HKCR\<ext>\PerceivedType groups extensions into broad categories
+    // (e.g. "document", "image", "audio").  Handlers registered under
+    // HKCR\SystemFileAssociations\<perceived-type> apply to every extension
+    // tagged with that type.
+    {
+        std::wstring perceivedType;
+        if (ReadDefaultString(HKEY_CLASSES_ROOT,
+                              (ext + L"\\PerceivedType").c_str(),
+                              perceivedType) && !perceivedType.empty())
+        {
+            const std::wstring sub = L"SystemFileAssociations\\" + perceivedType
+                                   + L"\\shellex\\" + catGuid;
+            if (ReadDefaultString(HKEY_CLASSES_ROOT, sub.c_str(), clsidStr))
+            {
+                HostLog(L"FindPreviewHandlerClsid: '%s' found via PerceivedType '%s'",
+                        ext.c_str(), perceivedType.c_str());
+                return CLSIDFromString(clsidStr.c_str(), out);
+            }
+        }
+    }
+
+    HostLog(L"FindPreviewHandlerClsid: no preview handler found for '%s'", ext.c_str());
+    return REGDB_E_CLASSNOTREG;
 }
 
 // ---------------------------------------------------------------------------
@@ -1963,6 +2038,102 @@ static void ResizeOfficeFullSta(int w, int h)
 }
 
 // ---------------------------------------------------------------------------
+// Preview-handler site object.
+//
+// IPreviewHandler requires the host to supply a site that implements:
+//
+//   IPreviewHandlerFrame  — accelerator translation contract; required by
+//                           Outlook's MSG handler and several other modern
+//                           Office handlers.  Without it DoPreview()
+//                           returns E_FAIL.
+//   IServiceProvider      — routes service queries (handlers often look up
+//                           IPreviewHandlerFrame through this).
+//   IOleWindow            — gives the handler a stable parent HWND it can
+//                           query at any time without depending on the
+//                           SetWindow argument staying valid.  Outlook in
+//                           particular needs this during DoPreview.
+//
+// The site must be installed via IObjectWithSite::SetSite BEFORE the
+// initial Initialize(*) call: Outlook's MSG handler asks for the site
+// from inside Initialize and aborts the load if it isn't there yet.
+// ---------------------------------------------------------------------------
+
+class PreviewHostSite : public IPreviewHandlerFrame,
+                        public IServiceProvider,
+                        public IOleWindow
+{
+    HWND m_hwndHost;
+    LONG m_ref = 1;
+public:
+    explicit PreviewHostSite(HWND hwndHost) : m_hwndHost(hwndHost) {}
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(IPreviewHandlerFrame))
+            *ppv = static_cast<IPreviewHandlerFrame*>(this);
+        else if (riid == IID_IServiceProvider)
+            *ppv = static_cast<IServiceProvider*>(this);
+        else if (riid == __uuidof(IOleWindow))
+            *ppv = static_cast<IOleWindow*>(this);
+        else
+            return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override
+    {
+        return InterlockedIncrement(&m_ref);
+    }
+    STDMETHODIMP_(ULONG) Release() override
+    {
+        LONG r = InterlockedDecrement(&m_ref);
+        if (r == 0) delete this;
+        return r;
+    }
+
+    // IPreviewHandlerFrame
+    STDMETHODIMP GetWindowContext(PREVIEWHANDLERFRAMEINFO* pInfo) override
+    {
+        if (!pInfo) return E_POINTER;
+        pInfo->haccel        = nullptr;
+        pInfo->cAccelEntries = 0;
+        return S_OK;
+    }
+    STDMETHODIMP TranslateAccelerator(MSG* /*pMsg*/) override
+    {
+        return S_FALSE;          // we don't consume any accelerator
+    }
+
+    // IServiceProvider — route IPreviewHandlerFrame and IOleWindow lookups
+    // back to ourselves (handlers sometimes ask through this rather than QI).
+    STDMETHODIMP QueryService(REFGUID guidService, REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (guidService == __uuidof(IPreviewHandlerFrame) ||
+            guidService == __uuidof(IOleWindow))
+            return QueryInterface(riid, ppv);
+        return E_NOINTERFACE;
+    }
+
+    // IOleWindow — return our render window so handlers can compute layout,
+    // create child controls, etc. independently of the SetWindow argument.
+    STDMETHODIMP GetWindow(HWND* phwnd) override
+    {
+        if (!phwnd) return E_POINTER;
+        *phwnd = m_hwndHost;
+        return S_OK;
+    }
+    STDMETHODIMP ContextSensitiveHelp(BOOL /*fEnter*/) override
+    {
+        return E_NOTIMPL;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Preview handler lifecycle. STA thread only.
 // ---------------------------------------------------------------------------
 
@@ -1971,6 +2142,15 @@ static void UnloadHandlerSta()
     HideFallbackSta();
     if (g_state.pHandler)
     {
+        // Drop our site reference cleanly so the handler can release its
+        // back-pointer to it before we tear the handler down.
+        IObjectWithSite* pOws = nullptr;
+        if (SUCCEEDED(g_state.pHandler->QueryInterface(
+                __uuidof(IObjectWithSite), reinterpret_cast<void**>(&pOws))))
+        {
+            pOws->SetSite(nullptr);
+            pOws->Release();
+        }
         g_state.pHandler->Unload();
         g_state.pHandler->Release();
         g_state.pHandler = nullptr;
@@ -2002,9 +2182,20 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
         HostLog(L"  CLSID = %s", clsidStr);
     }
 
+    // CLSCTX_LOCAL_SERVER only (no CLSCTX_INPROC_SERVER): preview handlers
+    // are contractually required to run out-of-process — Microsoft's
+    // IPreviewHandler docs state "A preview handler must be hosted in its
+    // own background process" — and many handlers actively check for this.
+    // Windows' built-in MAPI Mail Previewer (mssvp.dll, the .msg handler),
+    // for example, succeeds CoCreateInstance / Initialize / SetWindow but
+    // then fails DoPreview with E_FAIL when loaded in-process even though
+    // its registration has both InProcServer32 and an AppID surrogate.
+    // Forcing LOCAL_SERVER routes activation through the AppID's
+    // DllSurrogate (typically prevhost.exe), matching Explorer's preview
+    // pane and Microsoft's reference preview-host sample.
     IUnknown* pUnk = nullptr;
     hr = CoCreateInstance(clsid, nullptr,
-                          CLSCTX_LOCAL_SERVER | CLSCTX_INPROC_SERVER,
+                          CLSCTX_LOCAL_SERVER,
                           IID_IUnknown, reinterpret_cast<void**>(&pUnk));
     HostLog(L"  CoCreateInstance -> 0x%08lX", static_cast<long>(hr));
     if (FAILED(hr))
@@ -2014,6 +2205,40 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
         // an empty pane.
         ShowFallbackSta(path, hr);
         return S_OK;
+    }
+
+    // Microsoft's recommended call order for hosting a preview handler is:
+    //   CoCreateInstance → QI IPreviewHandler → SetSite → Initialize* →
+    //   SetWindow → DoPreview.
+    // Outlook's MSG handler in particular asks for its site from inside
+    // Initialize() and fails the whole load with E_FAIL if it isn't there
+    // yet, so the SetSite block has to run BEFORE any Initialize* call.
+
+    IPreviewHandler* pPH = nullptr;
+    hr = pUnk->QueryInterface(IID_IPreviewHandler, reinterpret_cast<void**>(&pPH));
+    HostLog(L"  QI IPreviewHandler -> 0x%08lX", static_cast<long>(hr));
+    if (FAILED(hr))
+    {
+        pUnk->Release();
+        ShowFallbackSta(path, hr);
+        return S_OK;
+    }
+
+    // Install the site (best-effort: a handler that doesn't implement
+    // IObjectWithSite simply doesn't need one).
+    {
+        IObjectWithSite* pOws = nullptr;
+        HRESULT shr = pPH->QueryInterface(__uuidof(IObjectWithSite),
+                                          reinterpret_cast<void**>(&pOws));
+        HostLog(L"  QI IObjectWithSite -> 0x%08lX", static_cast<long>(shr));
+        if (SUCCEEDED(shr))
+        {
+            PreviewHostSite* pSite = new PreviewHostSite(g_state.hwndRender);
+            HRESULT ssr = pOws->SetSite(static_cast<IPreviewHandlerFrame*>(pSite));
+            HostLog(L"  IObjectWithSite::SetSite -> 0x%08lX", static_cast<long>(ssr));
+            pSite->Release();              // SetSite holds its own ref if it needs one
+            pOws->Release();
+        }
     }
 
     bool initialized = false;
@@ -2064,22 +2289,57 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
         }
     }
 
+    // IInitializeWithItem is the modern Shell-item-based initializer.
+    // Outlook's MSG preview handler implements only this one (it rejects
+    // both IInitializeWithFile and IInitializeWithStream with E_NOINTERFACE).
+    if (!initialized)
+    {
+        IInitializeWithItem* pInit = nullptr;
+        HRESULT qhr = pUnk->QueryInterface(__uuidof(IInitializeWithItem),
+                                           reinterpret_cast<void**>(&pInit));
+        HostLog(L"  QI IInitializeWithItem -> 0x%08lX", static_cast<long>(qhr));
+        if (SUCCEEDED(qhr))
+        {
+            IShellItem* pItem = nullptr;
+            HRESULT shr = SHCreateItemFromParsingName(
+                path, nullptr, __uuidof(IShellItem),
+                reinterpret_cast<void**>(&pItem));
+            HostLog(L"  SHCreateItemFromParsingName -> 0x%08lX",
+                    static_cast<long>(shr));
+            if (SUCCEEDED(shr))
+            {
+                HRESULT ihr = pInit->Initialize(pItem, STGM_READ);
+                HostLog(L"  IInitializeWithItem::Initialize -> 0x%08lX",
+                        static_cast<long>(ihr));
+                pItem->Release();
+                initialized = SUCCEEDED(ihr);
+                if (!initialized) hr = ihr;
+            }
+            else
+            {
+                hr = shr;
+            }
+            pInit->Release();
+        }
+    }
+
     if (!initialized)
     {
         HostLog(L"  no Initialize* interface succeeded — showing fallback");
+        // Drop the site we installed earlier before releasing the handler.
+        {
+            IObjectWithSite* pOws = nullptr;
+            if (SUCCEEDED(pPH->QueryInterface(__uuidof(IObjectWithSite),
+                                               reinterpret_cast<void**>(&pOws))))
+            {
+                pOws->SetSite(nullptr);
+                pOws->Release();
+            }
+        }
+        pPH->Release();
         pUnk->Release();
         HRESULT reason = FAILED(hr) ? hr : E_NOINTERFACE;
         ShowFallbackSta(path, reason);
-        return S_OK;
-    }
-
-    IPreviewHandler* pPH = nullptr;
-    hr = pUnk->QueryInterface(IID_IPreviewHandler, reinterpret_cast<void**>(&pPH));
-    HostLog(L"  QI IPreviewHandler -> 0x%08lX", static_cast<long>(hr));
-    if (FAILED(hr))
-    {
-        pUnk->Release();
-        ShowFallbackSta(path, hr);
         return S_OK;
     }
 
@@ -2098,6 +2358,14 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 
     if (FAILED(hr))
     {
+        // Drop the site we installed before releasing the handler.
+        IObjectWithSite* pOws = nullptr;
+        if (SUCCEEDED(pPH->QueryInterface(__uuidof(IObjectWithSite),
+                                           reinterpret_cast<void**>(&pOws))))
+        {
+            pOws->SetSite(nullptr);
+            pOws->Release();
+        }
         pPH->Release();
         pUnk->Release();
         ShowFallbackSta(path, hr);
@@ -2498,6 +2766,31 @@ int wmain(int argc, wchar_t** argv)
     HostLog(L"  CoInitializeEx -> 0x%08lX", static_cast<long>(hr));
     if (FAILED(hr))
         return 2;
+
+    // Establish a process-wide COM security blanket BEFORE the first COM
+    // activation.  This matches Microsoft's PreviewHandler hosting sample
+    // and is mandatory for hosting handlers that run in the low-integrity
+    // prevhost.exe surrogate (notably Outlook's MSG handler): without it,
+    // cross-process calls between us and the surrogate fall back to a
+    // restrictive default that prevents the handler from completing
+    // DoPreview (it returns E_FAIL).  Once any interface is marshaled the
+    // default security is locked in, so this call must precede every
+    // CoCreateInstance — putting it here in wmain guarantees that.
+    //
+    // RPC_C_IMP_LEVEL_IMPERSONATE lets the surrogate impersonate our
+    // identity when it needs to open files on our behalf; that is the
+    // setting Windows Explorer's preview pane uses.
+    HRESULT hrSec = CoInitializeSecurity(
+        nullptr,                           // pSecDesc (use default)
+        -1,                                // cAuthSvc (negotiate)
+        nullptr,                           // asAuthSvc
+        nullptr,                           // pReserved1
+        RPC_C_AUTHN_LEVEL_DEFAULT,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        nullptr,                           // pAuthList
+        EOAC_NONE,
+        nullptr);                          // pReserved3
+    HostLog(L"  CoInitializeSecurity -> 0x%08lX", static_cast<long>(hrSec));
 
     // Job Object that owns any Office processes we spawn (see the
     // AssignOfficeProcessToJobSta calls in the per-app loaders). Set up
