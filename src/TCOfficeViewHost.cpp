@@ -315,7 +315,12 @@ static constexpr UINT WM_HOST_SWITCH_MODE = WM_USER + 4;     // user clicked the
 
 // Control ID for the mode-switch BUTTON child window of hwndRender —
 // referenced from RenderWndProc's WM_COMMAND handler.
-static constexpr UINT_PTR kModeButtonId   = 1001;
+static constexpr UINT_PTR kModeButtonId       = 1001;
+// Timer ID used to re-raise the mode button to HWND_TOP after a resize.
+// Preview handlers and Office apps may asynchronously reposition their own
+// windows in response to a resize (via a posted internal message), burying
+// the button.  A short one-shot timer fires after the handler settles.
+static constexpr UINT_PTR kModeButtonZTimerId = 1002;
 
 // ---------------------------------------------------------------------------
 // Registry lookup
@@ -388,6 +393,9 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
 
 static const wchar_t* kRenderClassName = L"TCOfficeViewHostRender";
 
+// Forward-declared so RenderWndProc's WM_TIMER handler can call it.
+static void UpdateModeButtonSta();
+
 static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -403,6 +411,23 @@ static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 PostMessageW(g_state.hwndSta, WM_HOST_SWITCH_MODE, 0, 0);
                 return 0;
+            }
+            break;
+
+        case WM_SIZE:
+            // A preview handler or embedded Office app may asynchronously
+            // reposition its window after a resize (via a posted internal
+            // message), pushing the mode button behind it.  Schedule a
+            // deferred re-raise so the button ends up on top once the
+            // handler has settled.
+            SetTimer(hWnd, kModeButtonZTimerId, 150, nullptr);
+            break;
+
+        case WM_TIMER:
+            if (wp == kModeButtonZTimerId)
+            {
+                KillTimer(hWnd, kModeButtonZTimerId);
+                UpdateModeButtonSta();
             }
             break;
     }
@@ -579,6 +604,8 @@ static void DestroyRenderWindowSta()
     DestroyCloseGuard();   // must go before hwndRender is destroyed
     if (g_state.hwndRender)
     {
+        // Cancel any pending deferred Z-raise timer before the window dies.
+        KillTimer(g_state.hwndRender, kModeButtonZTimerId);
         // Reparent back to HWND_MESSAGE before destroying — this severs the
         // cross-process link cleanly so TC's UI thread doesn't see a stale
         // child reference while we're tearing down.
@@ -2021,11 +2048,6 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 // to quick mode so the user always gets *some* preview.
 // ---------------------------------------------------------------------------
 
-// Refreshes the mode-switch button's label / position / visibility from
-// the current HostState. Forward-declared here because LoadFileWithModeSta
-// calls it before the implementation section further down.
-static void UpdateModeButtonSta();
-
 // Internal worker for LoadFileSta. Mode is supplied explicitly so the
 // user-initiated WM_HOST_SWITCH_MODE handler can force the opposite of
 // the INI-configured default for the current preview.
@@ -2072,6 +2094,11 @@ static HRESULT LoadFileWithModeSta(LPCWSTR path, AppKind app, Mode mode)
             if (SUCCEEDED(hr))
             {
                 UpdateModeButtonSta();
+                // Office apps may asynchronously reposition their embedded
+                // window after load (e.g. in response to WM_PARENTNOTIFY),
+                // covering the button.  Schedule a deferred re-raise.
+                if (g_state.hwndRender)
+                    SetTimer(g_state.hwndRender, kModeButtonZTimerId, 400, nullptr);
                 g_state.loadingInProgress = false;
                 return S_OK;
             }
@@ -2100,6 +2127,10 @@ static HRESULT LoadFileWithModeSta(LPCWSTR path, AppKind app, Mode mode)
 
     result = LoadHandlerSta(path);
     UpdateModeButtonSta();
+    // Quick-mode preview handlers may also do async window layout; a
+    // shorter delay is enough since they don't need Office startup time.
+    if (g_state.hwndRender)
+        SetTimer(g_state.hwndRender, kModeButtonZTimerId, 200, nullptr);
     g_state.loadingInProgress = false;
     return result;
 }
@@ -2133,9 +2164,10 @@ static void ResizeHandlerSta(int w, int h)
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     ResizeOfficeFullSta(w, h);
-    UpdateModeButtonSta();                       // reposition overlay button
 
     // Keep the close-guard stretched across the full width of the render pane.
+    // Must happen BEFORE UpdateModeButtonSta so that the subsequent HWND_TOP
+    // raise of the mode button lands above the guard (not below it).
     if (g_state.hwndCloseGuard)
     {
         UINT dpi = GetDpiForWindow(g_state.hwndRender);
@@ -2144,6 +2176,7 @@ static void ResizeHandlerSta(int w, int h)
                      0, 0, w, gh,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
+    UpdateModeButtonSta();                       // reposition overlay button above close guard
 }
 
 // ---------------------------------------------------------------------------
