@@ -77,23 +77,23 @@ The plugin advertises support for the union of these extensions. If a
 specific handler is missing, the plugin shows the fallback information
 panel for that file instead of failing silently.
 
-> **Word documents render in Web Layout view.** All Office Preview
-> Handlers (Word, Excel, PowerPoint) use a simplified embedded rendering
-> pipeline optimised for speed and stability inside a host window, not
-> the full editing UI. For Word this means a flowing Web Layout without
-> page breaks, headers or footers; Excel shows a simplified grid;
-> PowerPoint shows static slides without transitions. The plugin invokes
-> the handler the same way Windows Explorer (Alt+R) does — the rendering 
-> mode is hard-wired by Microsoft's handler implementation and there is no 
-> API on `IPreviewHandler` to change it. A future “full embedded” mode that
-> would drive a hidden Word/Excel/PowerPoint instance via OLE Automation
-> instead of the Preview Handler is a possible future development.
+> **Quick previews use a simplified rendering pipeline.** Office's
+> built-in preview components — used by Windows Explorer's preview
+> pane and by this plugin in the default mode — render through a
+> reduced pipeline optimised for speed and stability inside a host
+> window, not the full editing UI. For Word this means a flowing Web
+> Layout without page breaks, headers or footers; Excel shows a
+> simplified grid; PowerPoint shows static slides without transitions.
+> An opt-in **Full mode** that launches the real Word, Excel or
+> PowerPoint application and embeds its window into the Lister pane
+> is available; see [Application Render Mode](#application-render-mode)
+> below.
 
-> **MSG and VSDX caveat.** Recent Office / Outlook installs sometimes do
-> not register the shell Preview Handler for `.msg` or `.vsdx` — New
-> Outlook in particular drops the classic MAPI previewer. In those cases
-> Windows Explorer's own preview pane is empty too, and the plugin falls
-> back to the information panel.
+> **MSG and VSDX caveat.** The New Outlook (the modern rewrite) has
+> dropped the classic `.msg` preview handler, and recent Visio installs
+> sometimes omit the `.vsdx` handler. If Windows Explorer's own preview
+> pane is also empty for a given file, the plugin falls back to the
+> information panel.
 
 ### Configuration
 
@@ -142,6 +142,102 @@ Under `[FallbackUI]`:
 FontFamily=Cascadia Code
 FontSize=13
 ```
+
+#### Application Render Mode
+
+Four values are accepted per application under `[Mode]`:
+
+| Value | Render engine | Mode-switch button |
+|---|---|---|
+| `quick-switchable` **(default)** | Preview Handler | shown (→ Full) |
+| `quick` | Preview Handler | hidden |
+| `full-switchable` | OLE Automation (real app) | shown (→ Quick) |
+| `full` | OLE Automation (real app) | hidden |
+
+The **quick** engine is the built-in Office preview component hosted
+inside the Lister pane. It is fast (~200–800 ms to first display) and
+memory-light (~30–80 MB), but the rendering pipeline is simplified
+(Word in Web Layout without page breaks, Excel in a simplified grid,
+PowerPoint slides without transitions).
+
+The **full** engine launches the real Word, Excel or PowerPoint
+application in the background, opens the file read-only, and embeds
+its main window into the Lister pane. It is slower (~2–4 s cold
+start, ~100–300 MB per instance) but renders documents exactly as the
+application would.
+
+All three applications can be configured independently:
+
+```ini
+[Mode]
+Word=quick-switchable
+Excel=quick-switchable
+PowerPoint=quick-switchable
+```
+
+The **`-switchable` variants** show a persistent overlay button in the
+top-right corner of every Word / Excel / PowerPoint preview. One click
+flips the current preview to the other engine without changing your INI
+default. The switch is per-preview only — selecting another file (or
+re-opening the same one) returns to the configured default. The button
+is hidden for file types that have no full-mode equivalent (`.msg`,
+`.vsdx`) regardless of the setting.
+
+What full mode does for each application:
+
+- **Word** — shows the document in Print Layout (page boundaries,
+  headers, footers, page numbers) with the page scaled to the Lister
+  pane width. The zoom re-fits automatically when you resize the
+  pane. Rulers are hidden and the preview is truly read-only (typing
+  in the document is blocked).
+- **Excel** — opens the workbook read-only with the zoom set to
+  100%. Excel's initial layout fills the Lister pane on load.
+  **Known limits (full mode only — quick mode is unaffected):**
+    - Excel does not relayout when the Lister pane is later resized;
+      the content stays anchored to its initial area. Close the Lister
+      (Esc) and reopen it with F3/Ctrl+Q to get a fresh layout at the
+      new pane size.
+    - Interaction with the embedded Excel (selecting cells, dragging
+      a selection, clicking sheet tabs at the bottom, clicking ribbon
+      controls) is unreliable. Excel internally checks whether it is
+      the foreground top-level window before it processes much of its
+      mouse input — and once it is reparented as a child of another
+      process's window, those checks fail and clicks land in dead
+      areas. Word and PowerPoint do far less of this kind of checking,
+      which is why their full-mode embeds feel interactive even though
+      they use the same reparenting technique. If you need to interact
+      with the workbook, use **quick mode** (the default) — it does
+      not have this limitation. Full mode is best treated as a
+      visually faithful, mostly read-only viewer for Excel.
+- **PowerPoint** — opens the presentation read-only with the slide
+  scaled to fit the Lister pane. The zoom re-fits automatically when
+  you resize the pane. PowerPoint's main window appears on screen for
+  a fraction of a second before being embedded into the Lister (a
+  brief visible flash); Word and Excel embed silently.
+
+Full mode tradeoffs to be aware of:
+
+- **Cold start ~2–4 s** the first time an Office document of a given
+  application is opened. Subsequent documents of the *same*
+  application within the *same* Lister window load faster (~0.5–1 s)
+  because the running Office instance is reused. Switching between
+  file types (`.docx` → `.xlsx`) quits the previous application and
+  spins up the next one, so that switch pays the cold-start cost
+  again.
+- **Only one application embedded at a time.** The Lister pane is a
+  single embed point — you cannot have a Word document and an Excel
+  workbook visible in the same Lister.
+- **Memory ~100–300 MB** per running Office instance.
+- **Requires a full Microsoft Office installation** of the relevant
+  application — not Office Viewer, not LibreOffice.
+- **Falls back to quick mode** automatically on any failure (Office
+  missing, document password-protected, …), so you always get
+  *some* preview.
+- **No global Office settings are changed.** Full mode only touches
+  settings scoped to the open preview window — your standalone Word,
+  Excel and PowerPoint will start up exactly as you left them. The
+  ribbon, for example, stays visible in the preview because hiding
+  it would hijack your global Office settings.
 
 ### When MS Office Is Not Installed
 

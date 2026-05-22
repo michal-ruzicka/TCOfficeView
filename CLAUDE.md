@@ -116,12 +116,14 @@ short timer to avoid stalling TC's UI on the pipe write.
   are checked explicitly and turned into `ERR` responses; do not let C++
   exceptions escape into COM.
 - **STA discipline in the host.** All COM calls (`CoCreateInstance`,
-  `IPreviewHandler::*`) must happen on the STA thread. The pipe reader
-  runs on a worker thread and dispatches via `PostMessage` to a
-  message-only window on the STA thread. `SendMessage` would put the
-  STA into the input-synchronous state, where COM refuses outgoing calls
-  with `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` (0x8001010D) — the bug that
-  broke the first working build.
+  `IPreviewHandler::*`, `IDispatch::Invoke` on Word / Excel /
+  PowerPoint Application) must
+  happen on the STA thread. The pipe reader runs on a worker thread and
+  dispatches via `PostMessage` to a message-only window on the STA
+  thread. `SendMessage` would put the STA into the input-synchronous
+  state, where COM refuses outgoing calls with
+  `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` (0x8001010D) — the bug that broke
+  the first working build.
 - **Don't block in `WM_SIZE`** in the plugin. The DLL runs inside TC's UI
   thread; a blocking pipe write would stall the resize loop.
 - **Render in our process, not TC's.** The host creates its own child
@@ -156,6 +158,10 @@ Sections currently honoured:
   family auto-picks Aptos Mono → Consolas → Cascadia Mono → Lucida
   Console → Courier New. Font is DPI-aware (`GetDpiForWindow` +
   `MulDiv`).
+- `[Mode] Word=` / `Excel=` / `PowerPoint=` — four values accepted:
+  `quick-switchable` (default), `quick`, `full-switchable`, `full`.
+  `BaseMode()` extracts the actual loader mode (Quick/Full);
+  `IsSwitchable()` says whether to show the overlay button.
 
 The fallback panel is a child `EDIT` control inside `hwndRender`,
 created on any failure from `FindPreviewHandlerClsid` /
@@ -165,6 +171,186 @@ plugin in that case — the file was "shown", just via the fallback. The
 panel is sized in `ResizeHandlerSta` and torn down in
 `UnloadHandlerSta`.
 
+## Mode dispatch (quick vs full)
+
+`Mode` has four values: `Quick`, `QuickSwitchable`, `Full`,
+`FullSwitchable`. `BaseMode(m)` returns `Quick` or `Full`; `IsSwitchable(m)`
+returns whether the mode-switch button should be shown.
+
+`LoadFileSta` is the top-level LOAD entry point. It classifies the file by
+extension into `AppKind { Other, Word, Excel, PowerPoint }`, reads the
+config via `SelectMode(app)` (which may return a Switchable value), and
+calls `LoadFileWithModeSta(path, app, BaseMode(cfg))`. The worker only
+ever receives `Quick` or `Full`.
+
+`LoadFileWithModeSta` dispatches:
+
+- `Mode::Full` + `AppKind::Word` → `LoadWordFullSta`
+- `Mode::Full` + `AppKind::Excel` → `LoadExcelFullSta`
+- `Mode::Full` + `AppKind::PowerPoint` → `LoadPowerPointFullSta`
+- Anything else → `LoadHandlerSta` (the original preview-handler path).
+
+On any full-mode failure the dispatcher silently falls back to quick mode.
+
+`LoadFileWithModeSta` stores `currentFile`, `currentFileApp` and
+`currentLoadedMode` (`Quick` or `Full`) into `HostState`. These are used by:
+
+- the mode-switch overlay button to know what to re-load in the opposite mode;
+- `UpdateModeButtonSta` to pick the label (`→ Full` / `→ Quick`) and decide
+  visibility: `IsSwitchable(SelectMode(currentFileApp))` — hidden when the
+  configured mode is non-switchable or the file type is `Other`.
+
+The button's click handler in `RenderWndProc` posts `WM_HOST_SWITCH_MODE`
+to the STA window; the STA handler calls
+`LoadFileWithModeSta(currentFile, currentFileApp, opposite-mode)`. The
+switch is per-preview only — the next LOAD command from the plugin DLL
+goes through `LoadFileSta`, which picks up the INI-configured default again.
+
+Full-mode uses **OLE Automation via raw `IDispatch`** — no type library
+`#import`, no MFC. The thin helpers `DispGetId`, `DispCall`,
+`DispGetProperty`, `DispPutBool`, `DispPutI4`, `DispGetDispatchProperty`,
+`DispGetHwndProperty` wrap the `GetIDsOfNames` + `Invoke` dance, and are
+shared across all three apps.
+
+**Only one Office app can be embedded at a time** — the render pane is a
+single embed point. Each `LoadXxxFullSta` calls `UnloadYyyFullSta(true)`
+on the other two apps before installing its own window. Within a Lister
+session, switches between files of the *same* app reuse the running
+Application instance (just close/open the document); switches across
+apps pay the cold-start cost again.
+
+Per-app COM details:
+
+| App        | ProgID                  | Collection      | Open call signature                                   | Frame class    |
+|------------|-------------------------|-----------------|-------------------------------------------------------|----------------|
+| Word       | `Word.Application`      | `Documents`     | `Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles)` | `OpusApp`      |
+| Excel      | `Excel.Application`     | `Workbooks`     | `Open(FileName, UpdateLinks, ReadOnly)`               | `XLMAIN`       |
+| PowerPoint | `PowerPoint.Application`| `Presentations` | `Open(FileName, ReadOnly, Untitled, WithWindow)`      | `PPTFrameClass`|
+
+`Application.Visible` can be `False` for Word and Excel (the window
+materialises only after we set it back to `True` for the reparent step).
+**PowerPoint rejects `Visible = False`**, so its main window is always on
+screen between `Presentations.Open` and our `SetParent` — accept the
+brief flash.
+
+`Document.Close` arguments differ:
+- Word: `Close(SaveChanges = wdDoNotSaveChanges = 0)` (Long enum)
+- Excel: `Close(SaveChanges = False)` (Variant Boolean)
+- PowerPoint: `Close()` no args, with `Presentation.Saved = True` set
+  beforehand to suppress the save prompt.
+
+On CLOSE (Lister shutdown) all three Unload functions run; each is a
+no-op if its slot is empty.
+
+### Office process lifetime
+
+Office processes (Word / Excel / PowerPoint) spawned via COM
+(`CLSCTX_LOCAL_SERVER`) normally exit on their own once the last
+client COM reference is released, but that signal can get lost when
+the host dies abruptly (plugin-side `TerminateProcess` after a
+hanging Quit, Windows shutdown, host crash). To make the lifetime
+deterministic, the host creates a Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in `wmain` and assigns each
+Office process to it right after `EmbedOfficeWindowSta` (via the
+HWND → `GetWindowThreadProcessId` → `OpenProcess` →
+`AssignProcessToJobObject` sequence). When the host process exits
+through *any* path, the kernel closes the Job handle and the
+`KILL_ON_JOB_CLOSE` flag terminates every assigned Office process.
+
+The Job handle is intentionally **not** closed in `wmain`'s cleanup
+code: closing it triggers the kill immediately, which would race
+the `Application.Quit` calls in `UnloadXxxFullSta`. Letting the OS
+close it on process exit means the clean-quit path gets a chance
+to finish first and the Job is only the safety net for unclean
+exits.
+
+### Embedding the app window
+
+For Word and Excel the main HWND does not materialise until
+`Application.Visible = True`. For PowerPoint the HWND exists from
+`CoCreateInstance` since `Visible = False` is not allowed. The embedding
+sequence (parameterised on the app) is:
+
+1. `CoCreateInstance(*.Application, IID_IDispatch)` — process is up.
+2. Suppress dialogs: Word/PowerPoint use a `DisplayAlerts` enum (Word
+   `wdAlertsNone = 0`, PowerPoint `ppAlertsNone = 1`); Excel uses a
+   Boolean `DisplayAlerts = False`.
+3. For Word and Excel only: `Visible = False`.
+4. `Documents.Open` / `Workbooks.Open` / `Presentations.Open` with the
+   per-app args listed above. `IDispatch::Invoke` takes positional args
+   in **reverse order**; we don't try to skip ahead to optional
+   parameters past the first few (that would require named-arg
+   invocation).
+5. For Word and Excel: set `Visible = True` so the main window
+   materialises. (PowerPoint is already visible.)
+6. Locate the HWND. **`Application.Hwnd` is gone in modern Microsoft
+   365** (`GetIDsOfNames` returns `DISP_E_UNKNOWNNAME`). We try the
+   property once for older Office, then fall back to `EnumWindows`
+   looking for the app's frame class (`OpusApp` / `XLMAIN` /
+   `PPTFrameClass`), filtered by a window-title substring (the document
+   filename) to disambiguate from any pre-existing instance the user
+   may have running.
+7. `EmbedOfficeWindowSta`: `SetParent` into `hwndRender`, strip
+   `WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_BORDER|WS_POPUP|...`, add
+   `WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN`, `SetWindowPos` with
+   `SWP_FRAMECHANGED`.
+8. Store the HWND into the per-app slot (`hwndWordApp` /
+   `hwndExcelApp` / `hwndPptApp`).
+
+### Per-document preview tweaks (Word only)
+
+After embedding, `ConfigureWordForPreviewSta` applies:
+
+- `ActiveWindow.View.Type = wdPrintView` (= 3) — Print Layout.
+- `ActiveWindow.View.Zoom.PageFit = wdPageFitBestFit` (= 2) — page-width
+  zoom that re-fits on window resize.
+- `ActiveWindow.DisplayRulers = False`.
+- `Document.Protect(wdAllowOnlyReading)` — runtime read-only on top of
+  the `ReadOnly=True` open flag.
+
+Excel: `ConfigureExcelForPreviewSta` sets `ActiveWindow.Zoom = 100`
+(a Long percentage). We previously tried `Zoom = True` (Excel's "Fit
+Selection" mode) but the resulting zoom depended on whatever range
+Excel chose to fit and was visually unpredictable. Excel has no
+auto-refit-on-resize equivalent of Word's `wdPageFitBestFit`.
+
+Excel embedding has a **known limitation**: once Excel's frame is
+embedded, the inner widgets (ribbon, `XLDESK`, sheet tabs, status
+bar) lay out **once** at the initial frame size and do not relayout
+on subsequent programmatic resizes. To make the initial layout match
+the Lister pane we set `Application.Width`/`Height` (in points) just
+before `Workbooks.Open` — Excel's frame size at workbook-open time is
+what its layout engine commits to. Lister resizes after that point
+adjust the Win32 frame (`SetWindowPos` in `ResizeOfficeFullSta`) but
+Excel keeps drawing into the original area. Attempted workarounds
+that did **not** work in our setup:
+
+- `Application.Width`/`Height` toggled on resize — no effect on
+  child widgets.
+- `Application.WindowState = xlMaximized` after embed — blanks the
+  ribbon area.
+- `ActiveWindow.WindowState = xlMaximized` (maximize workbook
+  inside the MDI client) — also blanks the ribbon and doesn't make
+  the workbook follow the frame.
+- Synthetic `WM_EXITSIZEMOVE` after `SetWindowPos` — Excel ignores it.
+- `SWP_FRAMECHANGED` / `SWP_NOSENDCHANGING` flags on `SetWindowPos`
+  — no effect.
+
+The user-facing workaround is to close and reopen the Lister at the
+desired size; that triggers a fresh `LoadExcelFullSta` which sets
+`Application.Width`/`Height` before the workbook opens.
+
+PowerPoint: `ConfigurePowerPointForPreviewSta` sets
+`ActiveWindow.View.ZoomToFit = msoTrue`. Unlike Excel, this *is*
+auto-refit: PowerPoint rescales the slide as the window changes size.
+
+**Strict rule: we touch no `Application`-level Word setting.** Office
+persists Application properties (status bar, ribbon state, default
+zoom, recent files, …) into the user's profile on Quit, so changing
+them here would silently rewrite the user's standalone-Word
+preferences. Only window-, view- and document-scoped properties are in
+scope.
+
 ## Future work (not blocking)
 
 - Prefer `IInitializeWithStream` over `IInitializeWithFile` where supported;
@@ -173,6 +359,4 @@ panel is sized in `ResizeHandlerSta` and torn down in
   could be wired through to the host.
 - Persistent host process pooling — currently one host per Lister session.
   Reuse via `ListLoadNextW` is implemented; cross-session pooling is not.
-- Full embedded mode instead of OLE preview (Word paged layout instead
-  of web view), per-file-type configurable.
 - Release workflow automation (GitHub Actions triggered by `v*` tags).

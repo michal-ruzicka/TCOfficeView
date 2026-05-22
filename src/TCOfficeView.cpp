@@ -38,6 +38,7 @@ struct PreviewSession
     HWND            hwndChild   = nullptr;      // rendering target
     HANDLE          hProcess    = nullptr;      // TCOfficeViewHost.exe
     HANDLE          hPipe       = INVALID_HANDLE_VALUE;
+    HANDLE          hDrainThread = nullptr;     // pipe drain thread
     std::wstring    pipeName;
     std::wstring    currentFile;
 };
@@ -88,7 +89,7 @@ static std::wstring Utf8ToWide(const char* utf8)
 // an OVERLAPPED structure even when we want them to appear synchronous.
 // ---------------------------------------------------------------------------
 
-static BOOL PipeWriteSync(HANDLE h, const void* data, DWORD size)
+static BOOL PipeWriteSync(HANDLE h, const void* data, DWORD size, DWORD timeoutMs = 3000)
 {
     OVERLAPPED ov = {};
     ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -100,8 +101,44 @@ static BOOL PipeWriteSync(HANDLE h, const void* data, DWORD size)
     }
     DWORD written = 0;
     ok = GetOverlappedResult(h, &ov, &written, TRUE);
+    if (!ok)
+    {
+        // If the operation is still pending, cancel it and wait for cleanup.
+        if (GetLastError() == ERROR_IO_INCOMPLETE)
+        {
+            CancelIoEx(h, &ov);
+            GetOverlappedResult(h, &ov, &written, TRUE);
+        }
+    }
     CloseHandle(ov.hEvent);
     return ok && written == size;
+}
+
+// Drain thread: continuously reads and discards host responses so the pipe
+// buffer never fills up. The host sends "OK\n" / "ERR ...\n" replies that
+// the plugin historically never consumed.
+static DWORD WINAPI PipeDrainThread(LPVOID param)
+{
+    HANDLE hPipe = static_cast<HANDLE>(param);
+    constexpr DWORD kBufSize = 4096;
+    char buf[kBufSize];
+    for (;;)
+    {
+        DWORD bytesRead = 0;
+        OVERLAPPED ov = {};
+        ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        BOOL ok = ReadFile(hPipe, buf, kBufSize, nullptr, &ov);
+        if (!ok && GetLastError() != ERROR_IO_PENDING)
+        {
+            CloseHandle(ov.hEvent);
+            break;
+        }
+        ok = GetOverlappedResult(hPipe, &ov, &bytesRead, TRUE);
+        CloseHandle(ov.hEvent);
+        if (!ok || bytesRead == 0)
+            break;
+    }
+    return 0;
 }
 
 static BOOL PipeWriteUtf16(HANDLE h, const std::wstring& text)
@@ -175,12 +212,13 @@ static LRESULT CALLBACK ChildWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             const int w = rc.right - rc.left;
             const int h = rc.bottom - rc.top;
 
-            PreviewSession* session = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(g_sessionsMutex);
-                auto it = g_sessions.find(hWnd);
-                if (it != g_sessions.end()) session = it->second;
-            }
+            // Hold the lock for the entire pipe write to prevent a race
+            // with ListCloseWindow, which could erase and delete the session
+            // between the lookup and the write.
+            std::lock_guard<std::mutex> lock(g_sessionsMutex);
+            auto it = g_sessions.find(hWnd);
+            if (it == g_sessions.end()) return 0;
+            PreviewSession* session = it->second;
             if (session && session->hPipe != INVALID_HANDLE_VALUE)
             {
                 wchar_t cmd[64] = {};
@@ -245,7 +283,7 @@ static bool LaunchHost(PreviewSession* session, const std::wstring& file)
     PROCESS_INFORMATION pi = {};
     BOOL ok = CreateProcessW(
         exePath.c_str(),
-        cmdLine.data(),
+        &cmdLine[0],
         nullptr, nullptr, FALSE,
         CREATE_NO_WINDOW,
         nullptr, nullptr, &si, &pi);
@@ -270,6 +308,11 @@ static bool LaunchHost(PreviewSession* session, const std::wstring& file)
 
     std::wstring loadCmd = L"LOAD " + file + L"\n";
     PipeWriteUtf16(session->hPipe, loadCmd);
+
+    // Start a background thread that drains host replies so the 64 KB pipe
+    // buffer never fills up across many ListLoadNextW calls.
+    session->hDrainThread = CreateThread(nullptr, 0, PipeDrainThread,
+                                         session->hPipe, 0, nullptr);
     return true;
 }
 
@@ -280,6 +323,18 @@ static void TerminateSession(PreviewSession* session)
     if (session->hPipe != INVALID_HANDLE_VALUE)
     {
         PipeWriteUtf16(session->hPipe, L"CLOSE\n");
+
+        // Signal the drain thread to exit by closing its pipe handle from
+        // under it. CancelIoEx wakes GetOverlappedResult; the subsequent
+        // ReadFile fails with ERROR_INVALID_HANDLE and the thread exits.
+        if (session->hDrainThread)
+        {
+            CancelIoEx(session->hPipe, nullptr);
+            WaitForSingleObject(session->hDrainThread, 500);
+            CloseHandle(session->hDrainThread);
+            session->hDrainThread = nullptr;
+        }
+
         if (session->hProcess)
         {
             if (WaitForSingleObject(session->hProcess, 2000) != WAIT_OBJECT_0)
@@ -342,6 +397,8 @@ HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
 int __stdcall ListLoadNextW(HWND /*ParentWin*/, HWND PluginWin,
                             wchar_t* FileToLoad, int /*ShowFlags*/)
 {
+    if (!FileToLoad) return 0;
+
     PreviewSession* session = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_sessionsMutex);
