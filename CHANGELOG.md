@@ -35,13 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on Lister resize, rulers hidden, runtime read-only enforcement
     so typing in the preview is blocked.
   - **Excel** — zoom locked to 100% on load; initial frame size
-    matches the Lister pane. Excel does not relayout when the pane
-    is later resized (a fundamental limitation of embedding Excel
-    as a child window via OLE Automation that no combination of
-    SetWindowPos, Application.Width/Height, WindowState toggles
-    or WM_EXITSIZEMOVE synthesis convinced Excel to perform);
-    reopening the Lister at the desired size triggers a fresh
-    correct layout.
+    matches the Lister pane. Two intrinsic limitations of embedding
+    Excel as a child window via OLE Automation, which no combination
+    of style edits, window-message synthesis or activation tricks
+    convinced Excel to overcome:
+      1. Excel does not relayout when the pane is later resized;
+         reopening the Lister at the desired size triggers a fresh
+         correct layout.
+      2. Interactive mouse input (cell selection, sheet-tab clicks,
+         most ribbon buttons) is unreliable, because Excel gates much
+         of that processing on being the foreground top-level window —
+         and a reparented child of a foreign process never is.  Quick
+         mode is unaffected; for interactive work, use quick mode.
+         Full Excel mode is best treated as a read-only viewer.
   - **PowerPoint** — slide zoom auto-refits to the Lister pane on
     every resize. PowerPoint's main window appears briefly on
     screen before being embedded (a short visible flash) because

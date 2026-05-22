@@ -192,10 +192,23 @@ What full mode does for each application:
   in the document is blocked).
 - **Excel** — opens the workbook read-only with the zoom set to
   100%. Excel's initial layout fills the Lister pane on load.
-  **Known limit:** Excel does not relayout when the Lister pane is
-  later resized — the content stays anchored to its initial area.
-  Close the Lister (Esc) and reopen it with F3/Ctrl+Q to get a
-  fresh layout at the new pane size.
+  **Known limits (full mode only — quick mode is unaffected):**
+    - Excel does not relayout when the Lister pane is later resized;
+      the content stays anchored to its initial area. Close the Lister
+      (Esc) and reopen it with F3/Ctrl+Q to get a fresh layout at the
+      new pane size.
+    - Interaction with the embedded Excel (selecting cells, dragging
+      a selection, clicking sheet tabs at the bottom, clicking ribbon
+      controls) is unreliable. Excel internally checks whether it is
+      the foreground top-level window before it processes much of its
+      mouse input — and once it is reparented as a child of another
+      process's window, those checks fail and clicks land in dead
+      areas. Word and PowerPoint do far less of this kind of checking,
+      which is why their full-mode embeds feel interactive even though
+      they use the same reparenting technique. If you need to interact
+      with the workbook, use **quick mode** (the default) — it does
+      not have this limitation. Full mode is best treated as a
+      visually faithful, mostly read-only viewer for Excel.
 - **PowerPoint** — opens the presentation read-only with the slide
   scaled to fit the Lister pane. The zoom re-fits automatically when
   you resize the pane. PowerPoint's main window appears on screen for

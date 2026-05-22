@@ -1278,23 +1278,36 @@ static void ConfigureWordForPreviewSta()
     }
 }
 
-// Excel preview tweaks: set a fixed 100% zoom. We deliberately don't
+// Excel preview tweak: set a fixed 100% zoom (per-window, does not modify
+// the workbook on disk since we opened ReadOnly). We deliberately don't
 // touch Application.WindowState — for a WS_CHILD Excel frame, both
 // xlNormal and xlMaximized produce visual glitches (the latter blanks
 // the ribbon entirely). Layout for the initial size is handled in
 // LoadExcelFullSta by setting Application.Width/Height *before*
 // Workbooks.Open; ResizeOfficeFullSta keeps them in sync on resize.
-// Excel preview tweak: fixed 100% zoom. Per-window setting that does not
-// modify the workbook on disk (we opened ReadOnly).
 //
-// Known limit: Excel doesn't relayout its child widgets (ribbon, XLDESK,
-// sheet tabs, status bar) when the embedded Win32 frame is resized
-// programmatically — neither SetWindowPos, Application.Width/Height,
-// Application.WindowState nor ActiveWindow.WindowState reliably triggers
-// it. The initial layout is correct thanks to pre-Open Width/Height in
-// LoadExcelFullSta, but subsequent Lister resizes leave Excel's content
-// anchored to the original area. Reopening the Lister forces a fresh
-// initial layout at the new size.
+// Two intrinsic limits we accepted as not solvable from outside Excel:
+//
+//   1. Excel does not relayout its child widgets (ribbon, XLDESK, sheet
+//      tabs, status bar) when the embedded Win32 frame is resized
+//      programmatically — neither SetWindowPos, Application.Width/Height,
+//      Application.WindowState nor ActiveWindow.WindowState reliably
+//      triggers it. The initial layout is correct thanks to pre-Open
+//      Width/Height in LoadExcelFullSta, but subsequent Lister resizes
+//      leave Excel's content anchored to the original area. Reopening
+//      the Lister forces a fresh initial layout at the new size.
+//
+//   2. Interactive mouse input (cell selection, dragging, sheet-tab
+//      clicks, most ribbon buttons) is unreliable. Excel gates much of
+//      that processing on being the foreground top-level window via
+//      internal GetForegroundWindow checks, and a reparented child of
+//      a foreign process never is. Faking foreground (SetForegroundWindow,
+//      activation hooks, synthetic WM_ACTIVATE/WM_NCACTIVATE) either
+//      stole focus from Total Commander or had no effect on Excel's
+//      internal checks. Word and PowerPoint do far less of this gating,
+//      which is why their reparented embeds feel interactive. Users
+//      who need interaction should stay in quick mode; full mode is
+//      best treated as a read-only visual preview of Excel.
 static void ConfigureExcelForPreviewSta()
 {
     IDispatch* pWin = DispGetDispatchProperty(g_state.pExcelApp, L"ActiveWindow");
