@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.0.0] – 2026-05-22
 
 ### Added
 
@@ -193,7 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be left orphaned and reported as a "hung application" at the next
   system restart.
 
-## [1.0.0] – 2026-05-18
+## [v1.0.0] – 2026-05-18
 
 First public binary release.
 
@@ -217,7 +217,7 @@ First public binary release.
 - `CONTRIBUTING.md` now includes a *Release Process* section describing
   the local-build + GPG-sign + manual GitHub upload workflow.
 
-## [0.3.0] – 2026-05-18
+## [v0.3.0] – 2026-05-18
 
 ### Added
 
@@ -246,7 +246,7 @@ First public binary release.
   `/utf-8` so source files are interpreted as UTF-8 regardless of the
   system locale.
 
-## [0.2.0] – 2026-05-15
+## [v0.2.0] – 2026-05-15
 
 ### Added
 
@@ -267,7 +267,7 @@ First public binary release.
   compile-time kill-switch, but at run time logging is gated by the INI
   setting above.
 
-## [0.1.0] – 2026-05-15
+## [v0.1.0] – 2026-05-15
 
 First working release.
 
@@ -292,8 +292,8 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
-[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...v1.0.0
-[0.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/michal-ruzicka/TCOfficeView/releases/tag/v0.1.0
+[v2.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...v2.0.0
+[v1.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...v1.0.0
+[v0.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.2.0...v0.3.0
+[v0.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.1.0...v0.2.0
+[v0.1.0]: https://github.com/michal-ruzicka/TCOfficeView/releases/tag/v0.1.0
