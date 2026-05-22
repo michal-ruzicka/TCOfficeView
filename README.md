@@ -18,6 +18,8 @@ files alongside other file types such as images. If MS Office is not installed,
 the plugin shows a small information panel with the file's basic metadata
 instead of an empty preview, so it stays useful in any environment.
 
+![TCOfficeView shown on Word, Excel and PowerPoint sample files](TCOfficeView.gif)
+
 **Project page:** <https://github.com/michal-ruzicka/TCOfficeView> — source
 code, releases and issue tracker.
 
