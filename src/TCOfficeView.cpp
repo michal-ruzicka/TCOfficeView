@@ -121,7 +121,7 @@ static DWORD WINAPI PipeDrainThread(LPVOID param)
 {
     HANDLE hPipe = static_cast<HANDLE>(param);
     constexpr DWORD kBufSize = 4096;
-    auto* buf = new char[kBufSize];
+    char buf[kBufSize];
     for (;;)
     {
         DWORD bytesRead = 0;
@@ -138,7 +138,6 @@ static DWORD WINAPI PipeDrainThread(LPVOID param)
         if (!ok || bytesRead == 0)
             break;
     }
-    delete[] buf;
     return 0;
 }
 

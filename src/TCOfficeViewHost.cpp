@@ -575,7 +575,7 @@ static int ScaleForDpi(int sizeAt96Dpi, UINT dpi)
     return MulDiv(sizeAt96Dpi, dpi, USER_DEFAULT_SCREEN_DPI);
 }
 
-static bool CreateModeButtonSta(HINSTANCE hInst)
+static bool CreateModeButtonSta()
 {
     if (!g_state.hwndRender || g_state.hwndModeButton) return true;
 
@@ -589,7 +589,7 @@ static bool CreateModeButtonSta(HINSTANCE hInst)
         0, 0, w, h,
         g_state.hwndRender,
         reinterpret_cast<HMENU>(kModeButtonId),
-        hInst, nullptr);
+        GetModuleHandleW(nullptr), nullptr);
     if (!g_state.hwndModeButton)
     {
         HostLog(L"CreateModeButtonSta: CreateWindowEx failed err=%lu",
@@ -702,7 +702,7 @@ static bool CreateRenderWindowSta(HINSTANCE hInst)
 
     // Mode-switch overlay button — child of the render window, stays hidden
     // until the first LOAD picks an AppKind that supports both modes.
-    CreateModeButtonSta(hInst);
+    CreateModeButtonSta();
 
     // Periodic Z-order keep-alive: some preview handlers (Word in particular)
     // call SetWindowPos on their own window during scrolling without
@@ -1171,6 +1171,7 @@ static HWND FindOfficeTopLevelWindow(LPCWSTR className, LPCWSTR titleSubstr)
 // handler and the other two Office apps before installing its own window
 // into hwndRender. Definitions live in the sections below.
 static void UnloadHandlerSta();
+static void UnloadWordFullSta(bool quitApp);
 static void UnloadExcelFullSta(bool quitApp);
 static void UnloadPptFullSta(bool quitApp);
 
@@ -1421,20 +1422,20 @@ static void EnsureGuardClass(HINSTANCE hInst)
     wc.hInstance     = hInst;
     wc.lpszClassName = kGuardClassName;
     // Use a light gray brush so the guard is visible but not intrusive.
-    // We create the brush here and leak it — it lives for the process lifetime.
-    wc.hbrBackground = CreateSolidBrush(RGB(200, 200, 200));
+    // GetStockObject needs no cleanup.
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(LTGRAY_BRUSH));
     RegisterClassW(&wc);
     registered = true;
 }
 
 static void DestroyCloseGuard();   // forward declaration
 
-static void CreateCloseGuard(HINSTANCE hInst)
+static void CreateCloseGuard()
 {
     DestroyCloseGuard();   // idempotent
     if (!g_state.hwndRender) return;
 
-    EnsureGuardClass(hInst);
+    EnsureGuardClass(GetModuleHandleW(nullptr));
 
     UINT dpi = GetDpiForWindow(g_state.hwndRender);
     if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
@@ -1453,7 +1454,7 @@ static void CreateCloseGuard(HINSTANCE hInst)
         kGuardClassName, L"",
         WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE,
         x, y, w, h,
-        g_state.hwndRender, nullptr, hInst, nullptr);
+        g_state.hwndRender, nullptr, GetModuleHandleW(nullptr), nullptr);
 
     if (g_state.hwndCloseGuard)
     {
@@ -1506,7 +1507,7 @@ static bool EmbedOfficeWindowSta(HWND hwndApp)
     // SetWindowSubclass does not work on its HWND; the guard window (a
     // child of our render pane in this process) is the only reliable way
     // to block clicks on the button.
-    CreateCloseGuard(GetModuleHandleW(nullptr));
+    CreateCloseGuard();
 
     RECT rc; GetClientRect(g_state.hwndRender, &rc);
     SetWindowPos(hwndApp, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
@@ -2662,8 +2663,6 @@ static DWORD WINAPI PipeReaderThread(LPVOID)
 {
     constexpr DWORD kBufWChars = 32 * 1024;
     auto* buf = new wchar_t[kBufWChars];
-    bool gracefulClose = false;
-
     for (;;)
     {
         DWORD bytesRead = 0;
@@ -2706,9 +2705,6 @@ static DWORD WINAPI PipeReaderThread(LPVOID)
         }
         else if (wcsncmp(buf, L"CLOSE", 5) == 0)
         {
-            // STA's WM_HOST_CLOSE handler writes "OK" and posts WM_QUIT.
-            PostMessageW(g_state.hwndSta, WM_HOST_CLOSE, 0, 0);
-            gracefulClose = true;
             break;
         }
         else
@@ -2719,9 +2715,8 @@ static DWORD WINAPI PipeReaderThread(LPVOID)
 
     delete[] buf;
 
-    // If the pipe died unexpectedly, kick the STA out of its message loop.
-    if (!gracefulClose)
-        PostMessageW(g_state.hwndSta, WM_HOST_CLOSE, 0, 0);
+    // Kick the STA out of its message loop (graceful or unexpected pipe death).
+    PostMessageW(g_state.hwndSta, WM_HOST_CLOSE, 0, 0);
     return 0;
 }
 
@@ -2896,6 +2891,7 @@ int wmain(int argc, wchar_t** argv)
     CloseHandle(hPipe);
 
     DestroyWindow(g_state.hwndSta);
+    UnregisterClassW(L"TCOfficeViewHostSta", hInst);
     g_state.hwndSta = nullptr;
 
     // Clean up the Job Object handle so the kernel can release it.
