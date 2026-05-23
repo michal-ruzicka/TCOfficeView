@@ -31,28 +31,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GetFileAttributesExW` in the fallback panel — via a new
   `EnsureLongPathPrefix()` helper.
 
-  **Known limits, all on the Microsoft side and not bypassable from
-  the host:**
+  **Hard limits inside Office that the raw long path could not get
+  past — Word's preview handler returned `E_NOTIMPL` and Excel /
+  PowerPoint refused both Open() and their preview handlers on paths
+  above MAX_PATH-1 — are bypassed transparently** by creating a
+  per-LOAD directory junction (NTFS reparse point with
+  `IO_REPARSE_TAG_MOUNT_POINT`) in `%TEMP%` pointing at the file's
+  parent folder, and passing every consumer a short alias path
+  (`%TEMP%\TCOV_<pid>_<tick>\<filename>`) inside that junction.  The
+  kernel transparently follows the junction to the real file, so the
+  consumer never sees a long path at all.  This works regardless of
+  the `LongPathsEnabled` registry switch, requires no privileges
+  (junctions, unlike symbolic links, are unprivileged) and applies
+  uniformly to Word / Excel / PowerPoint in both quick and full mode.
 
-  - The **Office Word preview handler** rejects any path longer than
-    MAX_PATH with `E_NOTIMPL`, presumably from a hard-coded
-    `StringCchCopyW(buf, MAX_PATH, path)` that fails internally.  The
-    full-mode path (`Documents.Open`) still works because Word's main
-    application binary supports long paths.
-  - **Excel and PowerPoint** enforce an internal ~218-character limit
-    on the document path even in their main application binaries.
-    Files under longer paths cannot be opened in any of their modes.
-  - **MSG (`mssvp.dll`) quick mode** works on long paths because the
-    MAPI Mail Previewer is initialised through `IInitializeWithItem`
-    with an `IShellItem` produced by `SHCreateItemFromParsingName` on
-    a raw long path — there is no length-limited string contract
-    between us and the handler.
+  Junction lifecycle:
 
-  Workarounds via filesystem junctions (creating a short-path mount
-  point in `%TEMP%` that redirects to the file's directory) could be
-  added later if needed; they would let Word's preview handler and
-  Excel/PowerPoint open long-path files without changing any system
-  setting.
+  - **Creation**: on the LOAD that exceeds the threshold (`MAX_PATH-9`).
+  - **Removal on the next LOAD**: deferred until AFTER the loader has
+    closed the previous consumer's document (an earlier draft removed
+    the junction at the *top* of `LoadFileWithModeSta`, which routinely
+    failed because Word keeps a directory-change-notification handle on
+    the parent folder of an open document and that handle survives
+    until `Documents.Close`).
+  - **Removal on `WM_HOST_CLOSE`**: after the final `UnloadXxxFullSta`.
+  - **Retry queue**: a junction whose `RemoveDirectoryW` fails (Office
+    handle still pending, antivirus scan in flight, …) is parked on a
+    stale list and re-attempted on every subsequent cleanup opportunity.
+  - **Startup sweep**: every host process scans `%TEMP%\TCOV_*` on
+    launch and removes junctions whose owning PID is no longer alive.
+    This is the safety net for orphans left by host crashes or by TC
+    killing the host during shutdown.
+
+  MSG remains the exception: it never needs the junction because
+  `mssvp.dll` is initialised through `IInitializeWithItem` (Shell-item-
+  based, immune to path length).
 
 ## [v2.0.0] – 2026-05-22
 
