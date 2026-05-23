@@ -112,11 +112,23 @@ static std::wstring ExpandEnv(LPCWSTR s)
 
 static std::wstring GetHostExeDir()
 {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring s(path);
-    auto pos = s.find_last_of(L"\\/");
-    return (pos != std::wstring::npos) ? s.substr(0, pos) : L".";
+    // Grow the buffer until GetModuleFileNameW reports the full path fits.
+    // The host EXE may sit under a path longer than MAX_PATH; with a fixed-
+    // size buffer we'd silently truncate and the system-wide INI lookup
+    // would target the wrong directory.
+    std::wstring path;
+    DWORD bufSize = MAX_PATH;
+    for (;;)
+    {
+        path.resize(bufSize);
+        DWORD len = GetModuleFileNameW(nullptr, path.data(), bufSize);
+        if (len == 0) return L".";
+        if (len < bufSize) { path.resize(len); break; }
+        bufSize *= 2;
+        if (bufSize > 32768) return L".";
+    }
+    auto pos = path.find_last_of(L"\\/");
+    return (pos != std::wstring::npos) ? path.substr(0, pos) : L".";
 }
 
 static bool LoadConfigFrom(const std::wstring& iniPath)
@@ -156,12 +168,20 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
 static void LoadConfig()
 {
     // 1) Per-user override under TC's standard config directory.
-    wchar_t appdata[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH))
+    //    APPDATA itself is always short (~30 chars), but using a fixed
+    //    MAX_PATH buffer is the kind of inconsistency that drifts into
+    //    real bugs over time; a two-call dynamic read is just as cheap.
+    DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+    if (needed > 0)
     {
-        std::wstring userIni =
-            std::wstring(appdata) + L"\\GHISLER\\TCOfficeView.ini";
-        if (LoadConfigFrom(userIni)) return;
+        std::wstring appdata(needed, L'\0');
+        DWORD got = GetEnvironmentVariableW(L"APPDATA", appdata.data(), needed);
+        if (got > 0 && got < needed)
+        {
+            appdata.resize(got);
+            std::wstring userIni = appdata + L"\\GHISLER\\TCOfficeView.ini";
+            if (LoadConfigFrom(userIni)) return;
+        }
     }
     // 2) System-wide INI shipped alongside the host EXE.
     LoadConfigFrom(GetHostExeDir() + L"\\TCOfficeView.ini");
@@ -173,6 +193,49 @@ static void EnsureParentDir(const std::wstring& filePath)
     if (sep == std::wstring::npos) return;
     std::wstring dir = filePath.substr(0, sep);
     SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Long-path support
+//
+// Win32 file APIs that don't internally use the long-path-aware variants
+// silently fail (typically with ERROR_PATH_NOT_FOUND or some "file not
+// found" HRESULT) when the path exceeds ~MAX_PATH characters.  The
+// canonical workaround is the \\?\ prefix, which tells the kernel to
+// pass the path through without normalization and without enforcing the
+// legacy 260-char limit.  The prefix has rules:
+//
+//   - Only legal on FULLY QUALIFIED, normalized paths (no "." or "..",
+//     no forward slashes).  TC always hands us such paths, so we trust
+//     the input and don't try to normalize it ourselves.
+//   - Drive-letter form:  C:\foo\bar       →  \\?\C:\foo\bar
+//   - UNC form:           \\server\share\… →  \\?\UNC\server\share\…
+//
+// We only prepend the prefix when the path actually exceeds the safe
+// MAX_PATH ceiling.  Applying it to every path is harmless for the file
+// APIs themselves but disables Shell-side niceties (icon overlays,
+// link tracking, COM relative-path resolution), so we keep short paths
+// untouched.  The threshold of MAX_PATH-12 is what Microsoft's
+// own documentation recommends — it leaves room for an "8.3" filename
+// suffix that some APIs append internally.
+// ---------------------------------------------------------------------------
+
+static std::wstring EnsureLongPathPrefix(const std::wstring& path)
+{
+    // Already prefixed — \\?\, \\?\UNC\, \\.\ all bypass the limit.
+    if (path.size() >= 4 && path[0] == L'\\' && path[1] == L'\\' &&
+        (path[2] == L'?' || path[2] == L'.') && path[3] == L'\\')
+        return path;
+
+    // Short enough that no Win32 API would refuse it.
+    if (path.size() < MAX_PATH - 12) return path;
+
+    // UNC path: \\server\share\… → \\?\UNC\server\share\…
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+        return L"\\\\?\\UNC\\" + path.substr(2);
+
+    // Drive-letter / device path.
+    return L"\\\\?\\" + path;
 }
 
 // ---------------------------------------------------------------------------
@@ -895,8 +958,11 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
         text += L"\r\n";
     }
 
+    // Use the long-path-safe form when querying file attributes; the
+    // panel still displays the user's original path below.
+    const std::wstring longPath = EnsureLongPathPrefix(path);
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
-    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fad))
+    if (GetFileAttributesExW(longPath.c_str(), GetFileExInfoStandard, &fad))
     {
         ULARGE_INTEGER size;
         size.HighPart = fad.nFileSizeHigh;
@@ -1605,12 +1671,18 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
     }
     IDispatch* pDocs = vDocs.pdispVal;
 
+    // Raw long path — Office rejects the \\?\ prefix on BSTR FileName
+    // arguments the same way its preview handlers do.  Long paths work
+    // here only because Word ships with longPathAware itself and the
+    // system has LongPathsEnabled=1 in the registry.  Excel and
+    // PowerPoint have their own internal ~218-char limit on this
+    // argument that no system setting can lift.
     VARIANT args[4];
     for (int i = 0; i < 4; ++i) VariantInit(&args[i]);
-    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_FALSE;          // AddToRecentFiles
-    args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;           // ReadOnly
-    args[2].vt = VT_BOOL; args[2].boolVal = VARIANT_FALSE;          // ConfirmConversions
-    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);   // FileName
+    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_FALSE;            // AddToRecentFiles
+    args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;             // ReadOnly
+    args[2].vt = VT_BOOL; args[2].boolVal = VARIANT_FALSE;            // ConfirmConversions
+    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);     // FileName
 
     VARIANT vDoc; VariantInit(&vDoc);
     hr = DispCall(pDocs, L"Open", DISPATCH_METHOD, args, 4, &vDoc);
@@ -1787,11 +1859,13 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
     }
     IDispatch* pWbs = vWbs.pdispVal;
 
+    // Raw long path; Office rejects \\?\ on BSTR FileName.  Excel has
+    // its own ~218-char internal limit beyond what the system permits.
     VARIANT args[3];
     for (int i = 0; i < 3; ++i) VariantInit(&args[i]);
-    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_TRUE;           // ReadOnly
-    args[1].vt = VT_I4;   args[1].lVal    = 0;                      // UpdateLinks = xlUpdateLinksNever
-    args[2].vt = VT_BSTR; args[2].bstrVal = SysAllocString(path);   // FileName
+    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_TRUE;             // ReadOnly
+    args[1].vt = VT_I4;   args[1].lVal    = 0;                        // UpdateLinks = xlUpdateLinksNever
+    args[2].vt = VT_BSTR; args[2].bstrVal = SysAllocString(path);     // FileName
 
     VARIANT vWb; VariantInit(&vWb);
     hr = DispCall(pWbs, L"Open", DISPATCH_METHOD, args, 3, &vWb);
@@ -1961,12 +2035,14 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
     }
     IDispatch* pPresentations = vPress.pdispVal;
 
+    // Raw long path; Office rejects \\?\ on BSTR FileName.  PowerPoint
+    // has its own internal limit beyond what the system permits.
     VARIANT args[4];
     for (int i = 0; i < 4; ++i) VariantInit(&args[i]);
-    args[0].vt = VT_I4;   args[0].lVal    = -1;                     // WithWindow = msoTrue
-    args[1].vt = VT_I4;   args[1].lVal    = 0;                      // Untitled = msoFalse
-    args[2].vt = VT_I4;   args[2].lVal    = -1;                     // ReadOnly = msoTrue
-    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);   // FileName
+    args[0].vt = VT_I4;   args[0].lVal    = -1;                       // WithWindow = msoTrue
+    args[1].vt = VT_I4;   args[1].lVal    = 0;                        // Untitled = msoFalse
+    args[2].vt = VT_I4;   args[2].lVal    = -1;                       // ReadOnly = msoTrue
+    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);     // FileName
 
     VARIANT vPres; VariantInit(&vPres);
     hr = DispCall(pPresentations, L"Open", DISPATCH_METHOD, args, 4, &vPres);
@@ -2181,6 +2257,21 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     UnloadHandlerSta();
     HostLog(L"LoadHandlerSta: path='%s' render=0x%p", path, g_state.hwndRender);
 
+    // Long-path policy in this function: pass the RAW path everywhere.
+    //
+    // We learned the hard way that none of the consumers below accept the
+    // \\?\ prefix:
+    //   - Shell APIs (SHCreateItemFromParsingName / SHCreateStreamOnFileEx)
+    //     reject \\?\ in "display names" with E_INVALIDARG.  They handle
+    //     long paths through the system's longPathAware manifest + the
+    //     HKLM\…\FileSystem\LongPathsEnabled registry switch instead.
+    //   - Office preview handlers (Word / Excel / PowerPoint) likewise
+    //     reject \\?\ with E_NOTIMPL on IInitializeWithFile::Initialize.
+    //
+    // EnsureLongPathPrefix is still useful for Win32 file APIs that DO
+    // accept \\?\ (notably GetFileAttributesExW in BuildFallbackText), so
+    // the helper stays.  It just isn't applied here.
+
     CLSID clsid;
     HRESULT hr = FindPreviewHandlerClsid(path, &clsid);
     if (FAILED(hr))
@@ -2264,6 +2355,9 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
         HostLog(L"  QI IInitializeWithFile -> 0x%08lX", static_cast<long>(qhr));
         if (SUCCEEDED(qhr))
         {
+            // Raw path, not the \\?\-prefixed form: Office's preview
+            // handlers actively reject the prefix with E_NOTIMPL, but
+            // accept raw long paths when the system has LongPathsEnabled.
             HRESULT ihr = pInit->Initialize(path, STGM_READ);
             HostLog(L"  IInitializeWithFile::Initialize -> 0x%08lX",
                     static_cast<long>(ihr));

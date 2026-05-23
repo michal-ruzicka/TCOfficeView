@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Long path support (paths > MAX_PATH / 260 characters), to the extent
+  Windows and Office permit it.**  The host process now declares
+  `<longPathAware>true</longPathAware>` in its manifest, and
+  `GetModuleFileNameW` / `GetEnvironmentVariableW(L"APPDATA", …)`
+  callers no longer rely on fixed-size MAX_PATH buffers, so the
+  plugin can be installed under a long path.
+
+  Long paths require **both** `<longPathAware>true</longPathAware>` in
+  the manifest (we ship this) **and** the system-wide
+  `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`
+  registry switch (Windows default is `0`; user/admin must enable it).
+  With both in place, Win32 / Shell file APIs accept paths longer than
+  MAX_PATH and we pass the **raw** path to every preview entry point —
+  `IInitializeWithFile::Initialize`, `SHCreateStreamOnFileEx`,
+  `SHCreateItemFromParsingName`, and Office's `Documents.Open` /
+  `Workbooks.Open` / `Presentations.Open`.  All of them rejected the
+  `\\?\` long-path prefix in testing (Shell APIs with `E_INVALIDARG`,
+  Office handlers with `E_NOTIMPL`), so the prefix is only used for
+  Win32 file APIs that genuinely benefit from it — currently just
+  `GetFileAttributesExW` in the fallback panel — via a new
+  `EnsureLongPathPrefix()` helper.
+
+  **Known limits, all on the Microsoft side and not bypassable from
+  the host:**
+
+  - The **Office Word preview handler** rejects any path longer than
+    MAX_PATH with `E_NOTIMPL`, presumably from a hard-coded
+    `StringCchCopyW(buf, MAX_PATH, path)` that fails internally.  The
+    full-mode path (`Documents.Open`) still works because Word's main
+    application binary supports long paths.
+  - **Excel and PowerPoint** enforce an internal ~218-character limit
+    on the document path even in their main application binaries.
+    Files under longer paths cannot be opened in any of their modes.
+  - **MSG (`mssvp.dll`) quick mode** works on long paths because the
+    MAPI Mail Previewer is initialised through `IInitializeWithItem`
+    with an `IShellItem` produced by `SHCreateItemFromParsingName` on
+    a raw long path — there is no length-limited string contract
+    between us and the handler.
+
+  Workarounds via filesystem junctions (creating a short-path mount
+  point in `%TEMP%` that redirects to the file's directory) could be
+  added later if needed; they would let Word's preview handler and
+  Excel/PowerPoint open long-path files without changing any system
+  setting.
+
 ## [v2.0.0] – 2026-05-22
 
 ### Added
@@ -292,6 +341,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.0.0...HEAD
 [v2.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...v2.0.0
 [v1.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...v1.0.0
 [v0.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.2.0...v0.3.0

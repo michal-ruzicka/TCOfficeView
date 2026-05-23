@@ -5,9 +5,9 @@
 
 **A [Total Commander](https://www.ghisler.com/) Lister plugin that previews
 Microsoft Office documents — Word, Excel, PowerPoint and more — directly in TC's
-F3 / Quick View pane.** It hosts the Windows Preview Handlers that an MS Office
+`F3` / Quick View (`Ctrl+Q`) pane.** It hosts the Windows Preview Handlers that an MS Office
 installation already registers, so the previews look exactly like the ones in
-Windows Explorer or Outlook, without any document parsing of its own and without
+Windows Explorer (`Alt+P`) or Outlook, without any document parsing of its own and without
 a managed runtime.
 
 **This plugin is not a replacement for MS Office software; a working MS Office
