@@ -39,6 +39,7 @@
  */
 
 #include <windows.h>
+#include <winioctl.h>         // FSCTL_SET_REPARSE_POINT for the long-path junction helper
 #include <shobjidl.h>
 #include <shlwapi.h>
 #include <shlobj.h>           // SHCreateDirectoryExW
@@ -49,6 +50,7 @@
 #include <oleauto.h>          // IDispatch helpers: SysAllocString, VARIANT, ...
 #include <stdio.h>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
@@ -112,11 +114,23 @@ static std::wstring ExpandEnv(LPCWSTR s)
 
 static std::wstring GetHostExeDir()
 {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring s(path);
-    auto pos = s.find_last_of(L"\\/");
-    return (pos != std::wstring::npos) ? s.substr(0, pos) : L".";
+    // Grow the buffer until GetModuleFileNameW reports the full path fits.
+    // The host EXE may sit under a path longer than MAX_PATH; with a fixed-
+    // size buffer we'd silently truncate and the system-wide INI lookup
+    // would target the wrong directory.
+    std::wstring path;
+    DWORD bufSize = MAX_PATH;
+    for (;;)
+    {
+        path.resize(bufSize);
+        DWORD len = GetModuleFileNameW(nullptr, path.data(), bufSize);
+        if (len == 0) return L".";
+        if (len < bufSize) { path.resize(len); break; }
+        bufSize *= 2;
+        if (bufSize > 32768) return L".";
+    }
+    auto pos = path.find_last_of(L"\\/");
+    return (pos != std::wstring::npos) ? path.substr(0, pos) : L".";
 }
 
 static bool LoadConfigFrom(const std::wstring& iniPath)
@@ -156,12 +170,20 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
 static void LoadConfig()
 {
     // 1) Per-user override under TC's standard config directory.
-    wchar_t appdata[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH))
+    //    APPDATA itself is always short (~30 chars), but using a fixed
+    //    MAX_PATH buffer is the kind of inconsistency that drifts into
+    //    real bugs over time; a two-call dynamic read is just as cheap.
+    DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+    if (needed > 0)
     {
-        std::wstring userIni =
-            std::wstring(appdata) + L"\\GHISLER\\TCOfficeView.ini";
-        if (LoadConfigFrom(userIni)) return;
+        std::wstring appdata(needed, L'\0');
+        DWORD got = GetEnvironmentVariableW(L"APPDATA", appdata.data(), needed);
+        if (got > 0 && got < needed)
+        {
+            appdata.resize(got);
+            std::wstring userIni = appdata + L"\\GHISLER\\TCOfficeView.ini";
+            if (LoadConfigFrom(userIni)) return;
+        }
     }
     // 2) System-wide INI shipped alongside the host EXE.
     LoadConfigFrom(GetHostExeDir() + L"\\TCOfficeView.ini");
@@ -173,6 +195,49 @@ static void EnsureParentDir(const std::wstring& filePath)
     if (sep == std::wstring::npos) return;
     std::wstring dir = filePath.substr(0, sep);
     SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Long-path support
+//
+// Win32 file APIs that don't internally use the long-path-aware variants
+// silently fail (typically with ERROR_PATH_NOT_FOUND or some "file not
+// found" HRESULT) when the path exceeds ~MAX_PATH characters.  The
+// canonical workaround is the \\?\ prefix, which tells the kernel to
+// pass the path through without normalization and without enforcing the
+// legacy 260-char limit.  The prefix has rules:
+//
+//   - Only legal on FULLY QUALIFIED, normalized paths (no "." or "..",
+//     no forward slashes).  TC always hands us such paths, so we trust
+//     the input and don't try to normalize it ourselves.
+//   - Drive-letter form:  C:\foo\bar       →  \\?\C:\foo\bar
+//   - UNC form:           \\server\share\… →  \\?\UNC\server\share\…
+//
+// We only prepend the prefix when the path actually exceeds the safe
+// MAX_PATH ceiling.  Applying it to every path is harmless for the file
+// APIs themselves but disables Shell-side niceties (icon overlays,
+// link tracking, COM relative-path resolution), so we keep short paths
+// untouched.  The threshold of MAX_PATH-12 is what Microsoft's
+// own documentation recommends — it leaves room for an "8.3" filename
+// suffix that some APIs append internally.
+// ---------------------------------------------------------------------------
+
+static std::wstring EnsureLongPathPrefix(const std::wstring& path)
+{
+    // Already prefixed — \\?\, \\?\UNC\, \\.\ all bypass the limit.
+    if (path.size() >= 4 && path[0] == L'\\' && path[1] == L'\\' &&
+        (path[2] == L'?' || path[2] == L'.') && path[3] == L'\\')
+        return path;
+
+    // Short enough that no Win32 API would refuse it.
+    if (path.size() < MAX_PATH - 12) return path;
+
+    // UNC path: \\server\share\… → \\?\UNC\server\share\…
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+        return L"\\\\?\\UNC\\" + path.substr(2);
+
+    // Drive-letter / device path.
+    return L"\\\\?\\" + path;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +303,129 @@ static void HostLog(const wchar_t* fmt, ...)
 #else
 static void HostLog(const wchar_t*, ...) {}
 #endif
+
+// ---------------------------------------------------------------------------
+// Long-path workaround via NTFS directory junctions.
+//
+// Despite the host being longPathAware and the system having
+// LongPathsEnabled=1, several real-world consumers still refuse paths
+// past MAX_PATH-1:
+//
+//   - Microsoft Office's Word preview handler hard-rejects long paths
+//     via IInitializeWithFile::Initialize → E_NOTIMPL (looks like an
+//     internal StringCchCopyW(buf, MAX_PATH, path) check).
+//   - Excel and PowerPoint, both as preview handlers and at the
+//     application level via Documents.Open / Workbooks.Open, refuse
+//     paths longer than MAX_PATH-1 internally.
+//
+// The classic workaround is to create a directory junction (an NTFS
+// reparse point with the IO_REPARSE_TAG_MOUNT_POINT tag) in %TEMP%
+// pointing at the file's parent folder.  Both the junction path and
+// "junction\filename" are well under MAX_PATH, so every consumer
+// sees a short path and is happy.  The kernel transparently follows
+// the junction to the real file.  We don't need elevated privileges
+// (unlike symbolic links).
+// ---------------------------------------------------------------------------
+
+#ifndef IO_REPARSE_TAG_MOUNT_POINT
+#define IO_REPARSE_TAG_MOUNT_POINT 0xA0000003L
+#endif
+
+// Minimal in-memory layout of REPARSE_DATA_BUFFER for mount points.
+// The full union is in ntifs.h (DDK only).  We just need the
+// IO_REPARSE_TAG_MOUNT_POINT variant; symbolic links and the generic
+// buffer are deliberately omitted.
+struct JunctionReparseBuffer
+{
+    ULONG  ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    USHORT SubstituteNameOffset;
+    USHORT SubstituteNameLength;
+    USHORT PrintNameOffset;
+    USHORT PrintNameLength;
+    WCHAR  PathBuffer[1];
+};
+
+// Create a directory junction at `junctionPath` pointing to `targetPath`.
+// `junctionPath` must not yet exist (we create the directory).
+// `targetPath` must be an existing directory.  Logs and falls back
+// gracefully on any step's failure.
+static bool CreateJunctionSta(const std::wstring& junctionPath,
+                              const std::wstring& targetPath)
+{
+    if (!CreateDirectoryW(junctionPath.c_str(), nullptr))
+    {
+        HostLog(L"  CreateJunction: CreateDirectoryW('%s') failed err=%lu",
+                junctionPath.c_str(), GetLastError());
+        return false;
+    }
+
+    HANDLE h = CreateFileW(
+        junctionPath.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        HostLog(L"  CreateJunction: CreateFileW('%s') failed err=%lu",
+                junctionPath.c_str(), GetLastError());
+        RemoveDirectoryW(junctionPath.c_str());
+        return false;
+    }
+
+    // Reparse point payload:
+    //   SubstituteName — NT-namespace path "\??\<target>", used by the
+    //                    kernel to resolve the junction.
+    //   PrintName      — display path "<target>", shown to user tools.
+    // Both null-terminated, laid out back-to-back in PathBuffer.
+    const std::wstring substName = L"\\??\\" + targetPath;
+    const std::wstring& printName = targetPath;
+
+    const USHORT substBytes = static_cast<USHORT>(substName.size() * sizeof(wchar_t));
+    const USHORT printBytes = static_cast<USHORT>(printName.size() * sizeof(wchar_t));
+
+    const SIZE_T pathBufferBytes =
+        substBytes + sizeof(wchar_t) + printBytes + sizeof(wchar_t);
+    const SIZE_T totalSize =
+        offsetof(JunctionReparseBuffer, PathBuffer) + pathBufferBytes;
+
+    std::vector<BYTE> bytes(totalSize, 0);
+    auto* rb = reinterpret_cast<JunctionReparseBuffer*>(bytes.data());
+    rb->ReparseTag           = IO_REPARSE_TAG_MOUNT_POINT;
+    // ReparseDataLength counts everything AFTER the 8-byte common header
+    // (ReparseTag + ReparseDataLength + Reserved).
+    rb->ReparseDataLength    = static_cast<USHORT>(totalSize - 8);
+    rb->Reserved             = 0;
+    rb->SubstituteNameOffset = 0;
+    rb->SubstituteNameLength = substBytes;
+    rb->PrintNameOffset      = static_cast<USHORT>(substBytes + sizeof(wchar_t));
+    rb->PrintNameLength      = printBytes;
+    memcpy(rb->PathBuffer, substName.c_str(), substBytes + sizeof(wchar_t));
+    memcpy(reinterpret_cast<BYTE*>(rb->PathBuffer) + substBytes + sizeof(wchar_t),
+           printName.c_str(), printBytes + sizeof(wchar_t));
+
+    DWORD bytesReturned = 0;
+    BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT,
+                              rb, static_cast<DWORD>(totalSize),
+                              nullptr, 0, &bytesReturned, nullptr);
+    DWORD err = ok ? 0 : GetLastError();
+    CloseHandle(h);
+
+    if (!ok)
+    {
+        HostLog(L"  CreateJunction: DeviceIoControl failed err=%lu", err);
+        RemoveDirectoryW(junctionPath.c_str());
+        return false;
+    }
+
+    HostLog(L"  CreateJunction OK: '%s' -> '%s'",
+            junctionPath.c_str(), targetPath.c_str());
+    return true;
+}
 
 // Category GUID for Windows Preview Handlers — the subkey
 // HKCR\.<ext>\shellex\{8895b1c6-...} points to the handler's CLSID.
@@ -308,6 +496,23 @@ struct HostState
     // Excel / Word / PowerPoint instances we created go with it
     // instead of being left orphaned.
     HANDLE              hOfficeJob      = nullptr;
+
+    // Long-path workaround.  Most Office consumers (Word preview
+    // handler, Excel & PowerPoint at the application level) bail on
+    // paths longer than MAX_PATH-1 even with longPathAware + the
+    // system-wide LongPathsEnabled registry switch.  When we see such
+    // a path we create a directory junction in %TEMP% pointing at the
+    // file's parent and pass the resulting short alias path down to
+    // every consumer.  This field holds the junction's own path so
+    // we can RemoveDirectoryW it on the next LOAD / on CLOSE.
+    std::wstring              activeJunctionDir;
+
+    // Junctions whose RemoveDirectoryW failed (typically because Office
+    // still has a monitoring / change-notification handle on the
+    // directory).  Retried at every cleanup opportunity; whatever
+    // remains at WM_HOST_CLOSE is logged and left for the next host
+    // launch's startup sweep to pick up.
+    std::vector<std::wstring> staleJunctionDirs;
 
     IDispatch*          pPptApp         = nullptr;
     IDispatch*          pPptPres        = nullptr;
@@ -895,8 +1100,11 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
         text += L"\r\n";
     }
 
+    // Use the long-path-safe form when querying file attributes; the
+    // panel still displays the user's original path below.
+    const std::wstring longPath = EnsureLongPathPrefix(path);
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
-    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fad))
+    if (GetFileAttributesExW(longPath.c_str(), GetFileExInfoStandard, &fad))
     {
         ULARGE_INTEGER size;
         size.HighPart = fad.nFileSizeHigh;
@@ -1605,12 +1813,18 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
     }
     IDispatch* pDocs = vDocs.pdispVal;
 
+    // Raw long path — Office rejects the \\?\ prefix on BSTR FileName
+    // arguments the same way its preview handlers do.  Long paths work
+    // here only because Word ships with longPathAware itself and the
+    // system has LongPathsEnabled=1 in the registry.  Excel and
+    // PowerPoint have their own internal ~218-char limit on this
+    // argument that no system setting can lift.
     VARIANT args[4];
     for (int i = 0; i < 4; ++i) VariantInit(&args[i]);
-    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_FALSE;          // AddToRecentFiles
-    args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;           // ReadOnly
-    args[2].vt = VT_BOOL; args[2].boolVal = VARIANT_FALSE;          // ConfirmConversions
-    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);   // FileName
+    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_FALSE;            // AddToRecentFiles
+    args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;             // ReadOnly
+    args[2].vt = VT_BOOL; args[2].boolVal = VARIANT_FALSE;            // ConfirmConversions
+    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);     // FileName
 
     VARIANT vDoc; VariantInit(&vDoc);
     hr = DispCall(pDocs, L"Open", DISPATCH_METHOD, args, 4, &vDoc);
@@ -1787,11 +2001,13 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
     }
     IDispatch* pWbs = vWbs.pdispVal;
 
+    // Raw long path; Office rejects \\?\ on BSTR FileName.  Excel has
+    // its own ~218-char internal limit beyond what the system permits.
     VARIANT args[3];
     for (int i = 0; i < 3; ++i) VariantInit(&args[i]);
-    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_TRUE;           // ReadOnly
-    args[1].vt = VT_I4;   args[1].lVal    = 0;                      // UpdateLinks = xlUpdateLinksNever
-    args[2].vt = VT_BSTR; args[2].bstrVal = SysAllocString(path);   // FileName
+    args[0].vt = VT_BOOL; args[0].boolVal = VARIANT_TRUE;             // ReadOnly
+    args[1].vt = VT_I4;   args[1].lVal    = 0;                        // UpdateLinks = xlUpdateLinksNever
+    args[2].vt = VT_BSTR; args[2].bstrVal = SysAllocString(path);     // FileName
 
     VARIANT vWb; VariantInit(&vWb);
     hr = DispCall(pWbs, L"Open", DISPATCH_METHOD, args, 3, &vWb);
@@ -1961,12 +2177,14 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
     }
     IDispatch* pPresentations = vPress.pdispVal;
 
+    // Raw long path; Office rejects \\?\ on BSTR FileName.  PowerPoint
+    // has its own internal limit beyond what the system permits.
     VARIANT args[4];
     for (int i = 0; i < 4; ++i) VariantInit(&args[i]);
-    args[0].vt = VT_I4;   args[0].lVal    = -1;                     // WithWindow = msoTrue
-    args[1].vt = VT_I4;   args[1].lVal    = 0;                      // Untitled = msoFalse
-    args[2].vt = VT_I4;   args[2].lVal    = -1;                     // ReadOnly = msoTrue
-    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);   // FileName
+    args[0].vt = VT_I4;   args[0].lVal    = -1;                       // WithWindow = msoTrue
+    args[1].vt = VT_I4;   args[1].lVal    = 0;                        // Untitled = msoFalse
+    args[2].vt = VT_I4;   args[2].lVal    = -1;                       // ReadOnly = msoTrue
+    args[3].vt = VT_BSTR; args[3].bstrVal = SysAllocString(path);     // FileName
 
     VARIANT vPres; VariantInit(&vPres);
     hr = DispCall(pPresentations, L"Open", DISPATCH_METHOD, args, 4, &vPres);
@@ -2181,6 +2399,21 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     UnloadHandlerSta();
     HostLog(L"LoadHandlerSta: path='%s' render=0x%p", path, g_state.hwndRender);
 
+    // Long-path policy in this function: pass the RAW path everywhere.
+    //
+    // We learned the hard way that none of the consumers below accept the
+    // \\?\ prefix:
+    //   - Shell APIs (SHCreateItemFromParsingName / SHCreateStreamOnFileEx)
+    //     reject \\?\ in "display names" with E_INVALIDARG.  They handle
+    //     long paths through the system's longPathAware manifest + the
+    //     HKLM\…\FileSystem\LongPathsEnabled registry switch instead.
+    //   - Office preview handlers (Word / Excel / PowerPoint) likewise
+    //     reject \\?\ with E_NOTIMPL on IInitializeWithFile::Initialize.
+    //
+    // EnsureLongPathPrefix is still useful for Win32 file APIs that DO
+    // accept \\?\ (notably GetFileAttributesExW in BuildFallbackText), so
+    // the helper stays.  It just isn't applied here.
+
     CLSID clsid;
     HRESULT hr = FindPreviewHandlerClsid(path, &clsid);
     if (FAILED(hr))
@@ -2264,6 +2497,9 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
         HostLog(L"  QI IInitializeWithFile -> 0x%08lX", static_cast<long>(qhr));
         if (SUCCEEDED(qhr))
         {
+            // Raw path, not the \\?\-prefixed form: Office's preview
+            // handlers actively reject the prefix with E_NOTIMPL, but
+            // accept raw long paths when the system has LongPathsEnabled.
             HRESULT ihr = pInit->Initialize(path, STGM_READ);
             HostLog(L"  IInitializeWithFile::Initialize -> 0x%08lX",
                     static_cast<long>(ihr));
@@ -2398,10 +2634,176 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 // to quick mode so the user always gets *some* preview.
 // ---------------------------------------------------------------------------
 
+// Threshold above which we substitute the path with a junction-based short
+// alias. MAX_PATH-1 = 259 is the limit that several Office consumers
+// enforce internally; subtracting another 8 characters gives us margin
+// for the "8.3" filename suffix some Win32 APIs append.
+static constexpr size_t kLongPathAliasThreshold = MAX_PATH - 9;
+
+// Try to remove a junction directory.  Best-effort: on failure (typical
+// cause is Office having a directory-change-notification handle on the
+// target) the path is added to the stale list for later retry instead of
+// being silently leaked.
+static void TryRemoveJunctionSta(const std::wstring& dir)
+{
+    if (dir.empty()) return;
+    if (RemoveDirectoryW(dir.c_str()))
+    {
+        HostLog(L"  TryRemoveJunction OK: '%s'", dir.c_str());
+        return;
+    }
+    DWORD err = GetLastError();
+    HostLog(L"  TryRemoveJunction err=%lu — deferring '%s'", err, dir.c_str());
+    g_state.staleJunctionDirs.push_back(dir);
+}
+
+// Walk staleJunctionDirs, dropping ones we can now remove.
+static void RetryStaleJunctionsSta()
+{
+    auto& stale = g_state.staleJunctionDirs;
+    for (auto it = stale.begin(); it != stale.end(); )
+    {
+        if (RemoveDirectoryW(it->c_str()))
+        {
+            HostLog(L"  Retry junction cleanup OK: '%s'", it->c_str());
+            it = stale.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+// Remove the currently-installed junction (if any) and retry any
+// previously-deferred ones.  Caller must arrange that anything that
+// held the target — Word document, Excel workbook, PowerPoint
+// presentation, preview handler — has been closed before this runs.
+static void CleanupActiveJunctionSta()
+{
+    if (!g_state.activeJunctionDir.empty())
+    {
+        std::wstring dir = std::move(g_state.activeJunctionDir);
+        g_state.activeJunctionDir.clear();
+        TryRemoveJunctionSta(dir);
+    }
+    RetryStaleJunctionsSta();
+}
+
+// If `origPath` is long enough to trip a consumer's MAX_PATH check,
+// create a directory junction in %TEMP% pointing at its parent folder
+// and return a short alias path inside that junction.  On any failure
+// returns origPath unchanged (the caller will then get whatever error
+// the underlying consumer raises).
+//
+// Side effects: on success, g_state.activeJunctionDir is set to the
+// junction directory's path so CleanupActiveJunctionSta can remove it.
+static std::wstring MakeLongPathAliasSta(LPCWSTR origPath)
+{
+    const size_t len = wcslen(origPath);
+    if (len < kLongPathAliasThreshold) return origPath;
+
+    LPCWSTR sep = wcsrchr(origPath, L'\\');
+    if (!sep) return origPath;                              // no parent, give up
+    const std::wstring parentDir(origPath, sep - origPath);
+    const std::wstring filename(sep + 1);
+
+    // Resolve %TEMP% dynamically so a long-path %TEMP% still works.
+    DWORD needed = GetEnvironmentVariableW(L"TEMP", nullptr, 0);
+    if (needed == 0) return origPath;
+    std::wstring tempDir(needed, L'\0');
+    DWORD got = GetEnvironmentVariableW(L"TEMP", tempDir.data(), needed);
+    if (got == 0 || got >= needed) return origPath;
+    tempDir.resize(got);
+    if (!tempDir.empty() && tempDir.back() == L'\\') tempDir.pop_back();
+
+    wchar_t suffix[64] = {};
+    swprintf_s(suffix, ARRAYSIZE(suffix), L"\\TCOV_%lu_%llu",
+               GetCurrentProcessId(),
+               static_cast<unsigned long long>(GetTickCount64()));
+    const std::wstring junctionDir = tempDir + suffix;
+
+    if (!CreateJunctionSta(junctionDir, parentDir))
+        return origPath;                                    // fallback — caller fails noisily
+
+    g_state.activeJunctionDir = junctionDir;
+    const std::wstring alias = junctionDir + L"\\" + filename;
+    HostLog(L"  MakeLongPathAlias: %zu-char path -> %zu-char alias via '%s'",
+            len, alias.size(), junctionDir.c_str());
+    return alias;
+}
+
+// Sweep %TEMP% for orphaned TCOV_<pid>_<tick> junctions left behind by
+// previous host instances that exited abnormally (TC killed during
+// shutdown, host crash, etc.).  Junctions whose owner PID is still
+// alive are skipped — they belong to a concurrently-running host.
+// Called once at host start-up.
+static void CleanupOrphanedJunctionsAtStartup()
+{
+    DWORD needed = GetEnvironmentVariableW(L"TEMP", nullptr, 0);
+    if (needed == 0) return;
+    std::wstring tempDir(needed, L'\0');
+    DWORD got = GetEnvironmentVariableW(L"TEMP", tempDir.data(), needed);
+    if (got == 0 || got >= needed) return;
+    tempDir.resize(got);
+    if (!tempDir.empty() && tempDir.back() == L'\\') tempDir.pop_back();
+
+    const std::wstring pattern = tempDir + L"\\TCOV_*";
+    WIN32_FIND_DATAW fd = {};
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    int removed = 0, skipped = 0;
+    do
+    {
+        // Only directories that are reparse points (our junctions).
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        if (wcsncmp(fd.cFileName, L"TCOV_", 5) != 0) continue;
+
+        // Parse owner PID from the name.
+        DWORD pid = 0;
+        if (swscanf_s(fd.cFileName + 5, L"%lu_", &pid) != 1 || pid == 0)
+            continue;
+        if (pid == GetCurrentProcessId())
+            continue;                                   // ours (impossible at start-up, defensive)
+
+        // If the owning host is still running, leave its junction alone.
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (hProc)
+        {
+            DWORD exitCode = 0;
+            bool stillAlive = GetExitCodeProcess(hProc, &exitCode)
+                              && exitCode == STILL_ACTIVE;
+            CloseHandle(hProc);
+            if (stillAlive) { ++skipped; continue; }
+        }
+
+        const std::wstring full = tempDir + L"\\" + fd.cFileName;
+        if (RemoveDirectoryW(full.c_str()))
+        {
+            HostLog(L"  StartupSweep: removed orphan (pid %lu): '%s'",
+                    pid, full.c_str());
+            ++removed;
+        }
+        else
+        {
+            HostLog(L"  StartupSweep: RemoveDirectoryW(%s) failed err=%lu",
+                    full.c_str(), GetLastError());
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+
+    if (removed || skipped)
+        HostLog(L"  StartupSweep: removed=%d, skipped (live pid)=%d",
+                removed, skipped);
+}
+
 // Internal worker for LoadFileSta. Mode is supplied explicitly so the
 // user-initiated WM_HOST_SWITCH_MODE handler can force the opposite of
 // the INI-configured default for the current preview.
-static HRESULT LoadFileWithModeSta(LPCWSTR path, AppKind app, Mode mode)
+static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode)
 {
     if (g_state.loadingInProgress)
     {
@@ -2410,14 +2812,34 @@ static HRESULT LoadFileWithModeSta(LPCWSTR path, AppKind app, Mode mode)
     }
     g_state.loadingInProgress = true;
 
-    g_state.currentFile       = path;
+    // currentFile stores the user's ORIGINAL path; the mode-switch
+    // handler uses it to re-LOAD and recreates the alias from scratch.
+    g_state.currentFile       = origPath;
     g_state.currentFileApp    = app;
     g_state.currentLoadedMode = mode;
-    HostLog(L"LoadFileWithModeSta: app=%d mode=%s",
-            static_cast<int>(app),
-            mode == Mode::Full ? L"full" : L"quick");
 
-    HRESULT result = E_FAIL;
+    // Move the previous junction aside, but do NOT remove it yet — the
+    // previous consumer (Word document, Excel workbook, ...) is still
+    // alive and may hold a directory-change-notification handle on the
+    // junction, which would make RemoveDirectoryW fail.  We retry the
+    // removal at the end of this function, after the loader below has
+    // closed the previous document.
+    std::wstring prevJunctionDir = std::move(g_state.activeJunctionDir);
+    g_state.activeJunctionDir.clear();                  // defensive (move already cleared)
+
+    // For paths above the MAX_PATH ceiling that Office consumers enforce
+    // internally, substitute a short alias path inside a freshly-created
+    // %TEMP%\TCOV_… junction.  Everything downstream sees the alias.
+    const std::wstring aliasStorage = MakeLongPathAliasSta(origPath);
+    LPCWSTR path = aliasStorage.c_str();
+
+    HostLog(L"LoadFileWithModeSta: app=%d mode=%s%s",
+            static_cast<int>(app),
+            mode == Mode::Full ? L"full" : L"quick",
+            g_state.activeJunctionDir.empty() ? L"" : L" (via junction)");
+
+    HRESULT result          = E_FAIL;
+    bool    fellThroughFull = false;        // full mode failed → try quick
 
     if (mode == Mode::Full)
     {
@@ -2449,38 +2871,53 @@ static HRESULT LoadFileWithModeSta(LPCWSTR path, AppKind app, Mode mode)
                 // covering the button.  Schedule a deferred re-raise.
                 if (g_state.hwndRender)
                     SetTimer(g_state.hwndRender, kModeButtonZTimerId, 400, nullptr);
-                g_state.loadingInProgress = false;
-                return S_OK;
+                result = S_OK;
             }
-            HostLog(L"  %s full-mode failed (0x%08lX) — falling back to quick",
-                    appName, static_cast<long>(hr));
-            // Hard-reset all three app slots so quick mode starts from a
-            // clean state. Each Unload is a no-op if its slot was empty.
-            UnloadWordFullSta(true);
-            UnloadExcelFullSta(true);
-            UnloadPptFullSta(true);
-            // Failed full mode → actual loaded mode will be quick.
-            g_state.currentLoadedMode = Mode::Quick;
-            // fall through to quick mode
+            else
+            {
+                HostLog(L"  %s full-mode failed (0x%08lX) — falling back to quick",
+                        appName, static_cast<long>(hr));
+                // Hard-reset all three app slots so quick mode starts from a
+                // clean state. Each Unload is a no-op if its slot was empty.
+                UnloadWordFullSta(true);
+                UnloadExcelFullSta(true);
+                UnloadPptFullSta(true);
+                // Failed full mode → actual loaded mode will be quick.
+                g_state.currentLoadedMode = Mode::Quick;
+                fellThroughFull = true;
+            }
         }
     }
 
-    // Quick mode (or full-mode fallback path). If any Office app's window
-    // is still parented under the render pane, detach it first.
-    // Detach alone is not enough — we must also close the document so the
-    // Office app does not hold a lock on the file. Otherwise a rapid
-    // quick→full→quick switch can leave the document open in the background
-    // and the next full-mode open may fail or behave unpredictably.
-    if (g_state.hwndWordApp)  { CloseWordDocumentSta(); DetachWordWindowSta(); }
-    if (g_state.hwndExcelApp) { CloseExcelWorkbookSta(); DetachExcelWindowSta(); }
-    if (g_state.hwndPptApp)   { ClosePptPresentationSta(); DetachPptWindowSta(); }
+    if (mode != Mode::Full || fellThroughFull)
+    {
+        // Quick mode (or full-mode fallback path). If any Office app's window
+        // is still parented under the render pane, detach it first.
+        // Detach alone is not enough — we must also close the document so the
+        // Office app does not hold a lock on the file. Otherwise a rapid
+        // quick→full→quick switch can leave the document open in the background
+        // and the next full-mode open may fail or behave unpredictably.
+        if (g_state.hwndWordApp)  { CloseWordDocumentSta(); DetachWordWindowSta(); }
+        if (g_state.hwndExcelApp) { CloseExcelWorkbookSta(); DetachExcelWindowSta(); }
+        if (g_state.hwndPptApp)   { ClosePptPresentationSta(); DetachPptWindowSta(); }
 
-    result = LoadHandlerSta(path);
-    UpdateModeButtonSta();
-    // Quick-mode preview handlers may also do async window layout; a
-    // shorter delay is enough since they don't need Office startup time.
-    if (g_state.hwndRender)
-        SetTimer(g_state.hwndRender, kModeButtonZTimerId, 200, nullptr);
+        result = LoadHandlerSta(path);
+        UpdateModeButtonSta();
+        // Quick-mode preview handlers may also do async window layout; a
+        // shorter delay is enough since they don't need Office startup time.
+        if (g_state.hwndRender)
+            SetTimer(g_state.hwndRender, kModeButtonZTimerId, 200, nullptr);
+    }
+
+    // The loader above has now closed any previous consumer's document /
+    // released its file handles.  Attempt to remove the old junction
+    // (which we stashed at function entry); if Office STILL has a handle
+    // on it, it joins the stale list for retry on a later cleanup
+    // opportunity (next LOAD, WM_HOST_CLOSE, or the next host process's
+    // startup sweep).
+    TryRemoveJunctionSta(prevJunctionDir);
+    RetryStaleJunctionsSta();
+
     g_state.loadingInProgress = false;
     return result;
 }
@@ -2602,6 +3039,16 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             UnloadWordFullSta(true);
             UnloadExcelFullSta(true);
             UnloadPptFullSta(true);
+            // Remove any long-path junction we created in %TEMP%.
+            // Office docs have already been closed above, so the
+            // target's file handles are released.  Anything that's
+            // still stale at this point will be picked up by the
+            // next host launch's CleanupOrphanedJunctionsAtStartup.
+            CleanupActiveJunctionSta();
+            if (!g_state.staleJunctionDirs.empty())
+                HostLog(L"  WM_HOST_CLOSE: %zu junction(s) still stale, "
+                        L"deferring to next host's startup sweep",
+                        g_state.staleJunctionDirs.size());
             DestroyRenderWindowSta();
             PipeWriteUtf16(g_state.hPipe, L"OK\n");
             PostQuitMessage(0);
@@ -2768,6 +3215,11 @@ int wmain(int argc, wchar_t** argv)
     }
     HostLog(L"wmain: plugin-child=0x%p pipe='%s'",
             g_state.hwndPluginChild, pipeName.c_str());
+
+    // Sweep %TEMP% for junctions left behind by host instances that
+    // exited abnormally.  Cheap (one FindFirstFile + a few PID checks)
+    // and keeps long-lived TC sessions from accumulating orphans.
+    CleanupOrphanedJunctionsAtStartup();
 
     HRESULT hr = CoInitializeEx(nullptr,
                                 COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

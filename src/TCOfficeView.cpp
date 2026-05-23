@@ -56,11 +56,25 @@ static const UINT_PTR kResizeTimerId = 1;
 
 static std::wstring GetPluginDir()
 {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(g_hInstance, path, MAX_PATH);
-    std::wstring s(path);
-    auto pos = s.find_last_of(L"\\/");
-    return (pos != std::wstring::npos) ? s.substr(0, pos) : L".";
+    // Grow the buffer until GetModuleFileNameW reports the full path fits.
+    // On Windows 10 1607+ with longPathAware, the plugin DLL may live under
+    // a path longer than MAX_PATH; with a fixed-size buffer the API would
+    // truncate the result and we'd spawn the host EXE from the wrong place.
+    std::wstring path;
+    DWORD bufSize = MAX_PATH;
+    for (;;)
+    {
+        path.resize(bufSize);
+        DWORD len = GetModuleFileNameW(g_hInstance, path.data(), bufSize);
+        if (len == 0) return L".";
+        if (len < bufSize) { path.resize(len); break; }
+        // Truncated — buffer was too small.  Win32 caps practical paths at
+        // ~32k wchars, so this loop terminates.
+        bufSize *= 2;
+        if (bufSize > 32768) return L".";
+    }
+    auto pos = path.find_last_of(L"\\/");
+    return (pos != std::wstring::npos) ? path.substr(0, pos) : L".";
 }
 
 static std::wstring MakePipeName()

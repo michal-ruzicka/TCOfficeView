@@ -1,13 +1,15 @@
 # TCOfficeView: a Total Commander Lister Plugin that Previews Microsoft Office Documents
 
 [![Build](https://github.com/michal-ruzicka/TCOfficeView/actions/workflows/build.yml/badge.svg)](https://github.com/michal-ruzicka/TCOfficeView/actions/workflows/build.yml)
-[![GitHub Sponsors](https://img.shields.io/github/sponsors/michal-ruzicka)](https://github.com/sponsors/michal-ruzicka)
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?style=flat&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/michal-ruzicka)
+[![Ko-fi](https://img.shields.io/badge/Tip-Ko--fi-FF5E5B?style=flat&logo=kofi&logoColor=white)](https://ko-fi.com/michal_ruzicka)
+[![Revolut](https://img.shields.io/badge/Pay-Revolut-191C1F?style=flat&logo=revolut&logoColor=white)](https://revolut.me/ruzicka_michal)
 
 **A [Total Commander](https://www.ghisler.com/) Lister plugin that previews
 Microsoft Office documents — Word, Excel, PowerPoint and more — directly in TC's
-F3 / Quick View pane.** It hosts the Windows Preview Handlers that an MS Office
+`F3` / Quick View (`Ctrl+Q`) pane.** It hosts the Windows Preview Handlers that an MS Office
 installation already registers, so the previews look exactly like the ones in
-Windows Explorer or Outlook, without any document parsing of its own and without
+Windows Explorer (`Alt+P`) or Outlook, without any document parsing of its own and without
 a managed runtime.
 
 **This plugin is not a replacement for MS Office software; a working MS Office
@@ -26,7 +28,19 @@ code, releases and issue tracker.
 
 **Binary releases:** <https://github.com/michal-ruzicka/TCOfficeView/releases>
 
-**Support:** <https://github.com/sponsors/michal-ruzicka> — if you find this plugin useful, consider supporting its development.
+**Support:** If you find this plugin useful, consider supporting its development.
+
+- <https://github.com/sponsors/michal-ruzicka> — GitHub Sponsors (GitHub account needed).
+
+  [![GitHub Sponsors](https://img.shields.io/github/sponsors/michal-ruzicka)](https://github.com/sponsors/michal-ruzicka)
+
+- <https://ko-fi.com/michal_ruzicka> — Buy me a Coffee with no specific account needed, card payment is possible.
+
+  [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/michal_ruzicka)
+
+- <https://revolut.me/ruzicka_michal> — Donate me via Revolut, debet/credit card or Apple Pay.
+
+  [![Revolut.Me](Revolut.Me.png)](https://revolut.me/ruzicka_michal)
 
 ---
 

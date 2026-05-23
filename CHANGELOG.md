@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.1.0] – 2026-05-23
+
+### Added
+
+- **Long path support (paths > MAX_PATH / 260 characters), to the extent
+  Windows and Office permit it.**  The host process now declares
+  `<longPathAware>true</longPathAware>` in its manifest, and
+  `GetModuleFileNameW` / `GetEnvironmentVariableW(L"APPDATA", …)`
+  callers no longer rely on fixed-size MAX_PATH buffers, so the
+  plugin can be installed under a long path.
+
+  Long paths require **both** `<longPathAware>true</longPathAware>` in
+  the manifest (we ship this) **and** the system-wide
+  `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`
+  registry switch (Windows default is `0`; user/admin must enable it).
+  With both in place, Win32 / Shell file APIs accept paths longer than
+  MAX_PATH and we pass the **raw** path to every preview entry point —
+  `IInitializeWithFile::Initialize`, `SHCreateStreamOnFileEx`,
+  `SHCreateItemFromParsingName`, and Office's `Documents.Open` /
+  `Workbooks.Open` / `Presentations.Open`.  All of them rejected the
+  `\\?\` long-path prefix in testing (Shell APIs with `E_INVALIDARG`,
+  Office handlers with `E_NOTIMPL`), so the prefix is only used for
+  Win32 file APIs that genuinely benefit from it — currently just
+  `GetFileAttributesExW` in the fallback panel — via a new
+  `EnsureLongPathPrefix()` helper.
+
+  **Hard limits inside Office that the raw long path could not get
+  past — Word's preview handler returned `E_NOTIMPL` and Excel /
+  PowerPoint refused both Open() and their preview handlers on paths
+  above MAX_PATH-1 — are bypassed transparently** by creating a
+  per-LOAD directory junction (NTFS reparse point with
+  `IO_REPARSE_TAG_MOUNT_POINT`) in `%TEMP%` pointing at the file's
+  parent folder, and passing every consumer a short alias path
+  (`%TEMP%\TCOV_<pid>_<tick>\<filename>`) inside that junction.  The
+  kernel transparently follows the junction to the real file, so the
+  consumer never sees a long path at all.  This works regardless of
+  the `LongPathsEnabled` registry switch, requires no privileges
+  (junctions, unlike symbolic links, are unprivileged) and applies
+  uniformly to Word / Excel / PowerPoint in both quick and full mode.
+
+  Junction lifecycle:
+
+  - **Creation**: on the LOAD that exceeds the threshold (`MAX_PATH-9`).
+  - **Removal on the next LOAD**: deferred until AFTER the loader has
+    closed the previous consumer's document (an earlier draft removed
+    the junction at the *top* of `LoadFileWithModeSta`, which routinely
+    failed because Word keeps a directory-change-notification handle on
+    the parent folder of an open document and that handle survives
+    until `Documents.Close`).
+  - **Removal on `WM_HOST_CLOSE`**: after the final `UnloadXxxFullSta`.
+  - **Retry queue**: a junction whose `RemoveDirectoryW` fails (Office
+    handle still pending, antivirus scan in flight, …) is parked on a
+    stale list and re-attempted on every subsequent cleanup opportunity.
+  - **Startup sweep**: every host process scans `%TEMP%\TCOV_*` on
+    launch and removes junctions whose owning PID is no longer alive.
+    This is the safety net for orphans left by host crashes or by TC
+    killing the host during shutdown.
+
+  MSG remains the exception: it never needs the junction because
+  `mssvp.dll` is initialised through `IInitializeWithItem` (Shell-item-
+  based, immune to path length).
+
 ## [v2.0.0] – 2026-05-22
 
 ### Added
@@ -292,6 +354,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[v2.1.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...v2.0.0
 [v1.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...v1.0.0
 [v0.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.2.0...v0.3.0

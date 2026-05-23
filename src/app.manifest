@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="2.0.0.0" name="TCOfficeViewHost"/>
+  <assemblyIdentity version="2.1.0.0" name="TCOfficeViewHost"/>
 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
@@ -10,11 +10,16 @@
     </security>
   </trustInfo>
 
-  <!-- Per-monitor DPI awareness — required for crisp Office preview rendering on HiDPI displays. -->
+  <!-- Per-monitor DPI awareness — required for crisp Office preview rendering on HiDPI displays.
+       Long-path awareness — lets Win32 file APIs accept paths longer than MAX_PATH on Windows 10
+       1607+ (requires the global registry switch HKLM\SYSTEM\CurrentControlSet\Control\FileSystem
+       \LongPathsEnabled=1 too).  We additionally prepend \\?\ at the call site for paths above
+       MAX_PATH so we work even on older Windows or when the registry switch is off. -->
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>
 </assembly>
