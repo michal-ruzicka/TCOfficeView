@@ -5,6 +5,199 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.2.0] – 2026-05-25
+
+**Universal Preview Handler support** is tha main enhancement of this 
+release — **PDF, HTML, ... Anything that Explorer's Alt+P pane can show** 
+is now supported by TCOfficeView Total Commander plugin.
+
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
+
+### Added
+
+- **Universal Preview Handler support (PDF, HTML, anything Explorer's
+  Alt+P pane can show).**  The plugin advertises support for all file
+  type (`EXT="*"`) so fresh installs work out of the box for the common 
+  formats; users who want truly universal support can switch the detect 
+  string in TC to `EXT="*"` (documented in README) and the plugin will 
+  be asked about every file.  A new registry probe in the plugin DLL
+  (`HasPreviewHandlerForExt`, mirroring the host's
+  `FindPreviewHandlerClsid` lookup chain — direct shellex → default
+  ProgID → `OpenWithProgids` → `SystemFileAssociations\<ext>` →
+  `SystemFileAssociations\<PerceivedType>`) decides at LOAD time
+  whether a Windows Preview Handler is actually registered for the
+  file's extension; if not, the plugin returns the "decline" value
+  so TC moves on to the next configured Lister plugin or its
+  built-in viewer.  Cost: one zero-allocation registry walk per
+  F3 / Ctrl+Q; no host process spawn for files we can't render.
+
+  In practice this gives the user automatic support for **PDF** (via
+  Edge's built-in handler on Windows 10+, or Adobe Acrobat Reader if
+  installed), **MSG** (via Windows' built-in MAPI Mail Previewer),
+  and — with `EXT="*"` — Photoshop **PSD**, AutoCAD **DWG/DXF**,
+  Sketchup **SKP**, and anything else that ships a Preview Handler.
+
+- **`[PreviewHandlers]` INI section for per-extension CLSID overrides.**
+  When several preview handlers are installed for the same file type
+  (e.g. both Microsoft Edge and Adobe Reader register one for `.pdf`,
+  whichever was installed last wins system-wide), the user can now
+  pin a specific handler for this plugin only by writing
+  `<.ext>=<CLSID>` in the INI:
+
+  ```ini
+  [PreviewHandlers]
+  .pdf={3A84F9C2-6164-485C-A7D9-4B27F8AC009E}
+  ```
+
+  Override entries are consulted before the standard registry lookup
+  chain; the system-wide registration is the fallback when no override
+  matches.  Bad CLSIDs are silently ignored at load time.  Explorer's
+  preview pane and other applications keep using whatever Windows
+  picked as the system default — the override is scoped to
+  TCOfficeView only.  The shipped sample INI documents the format and
+  points at the
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`
+  registry key where every installed handler is enumerated with its
+  CLSID and friendly name.
+
+- **Optional discovery report** — set `[PreviewHandlers] ReportPath=<path>`
+  in the INI to enable.  When the option is set, the host writes
+  (on a low-priority background thread, every time it starts) a
+  human-readable text file at the chosen location containing:
+
+  - **Section 1** — every installed preview handler on the machine,
+    sorted by friendly name, with its CLSID alongside (the master
+    pick-list).  Source: `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`.
+  - **Section 2** — the current per-extension assignment for every
+    file type that has a registered handler (walked from `HKCR\.*`),
+    preformatted as commented-out INI lines
+    (`;.pdf={CLSID} ; Friendly name`) sorted by extension and ready
+    to copy into the `[PreviewHandlers]` section of
+    `TCOfficeView.ini` — uncomment a row, swap the CLSID for one of
+    the alternatives from section 1 above.
+
+  Written atomically via a `.tmp` file + `MoveFileExW`, so the
+  report is never observed half-written.  Off by default — the
+  registry walk is cheap but it's still wasted work on every Lister
+  session when the user isn't actively configuring overrides.  Turn
+  it on while setting up overrides, then comment the line out again.
+  Failure (path unwritable, destination locked by an editor, …) is
+  logged and silently skipped — the report is a convenience, not a
+  requirement for the plugin to function.
+
+- **Per-extension deny in `[PreviewHandlers]`** — write `.ext=` (empty
+  value) to skip an extension entirely.  TCOfficeView then behaves
+  as if no preview handler existed for that file type: the plugin
+  DLL returns `nullptr` from `ListLoadW` / `LISTPLUGIN_ERROR` from
+  `ListLoadNextW`, Total Commander routes the file to the next
+  configured Lister plugin or its built-in viewer, and the host
+  process is never even spawned.  Useful when another Lister plugin
+  does a better job for a specific file type (e.g. a dedicated PDF
+  previewer) and the user wants to keep TCOfficeView for everything
+  else.
+
+  The plugin DLL re-reads the `[PreviewHandlers]` section from the
+  INI on every `ListLoadW` / `ListLoadNextW` call, so deny-list edits
+  take effect immediately without restarting Total Commander.  The
+  host re-reads the section on every spawn and honours the deny list
+  inside `FindPreviewHandlerClsid` as a defence-in-depth backstop in
+  case the DLL ever forwards a file for a denied extension.
+
+### Changed
+
+- README's “Supported Formats” section is now an indicative list of
+  common handlers rather than the authoritative whitelist (which is
+  whatever the user's machine has registered).  The “When MS Office
+  Is Not Installed” section was renamed and rewritten to reflect the
+  new behaviour: silent decline + TC fall-through for files with no
+  handler, and the fallback panel reserved for cases where a handler
+  IS registered but fails at run time.
+
+### Fixed
+
+- **`[PreviewHandlers]` parser rejected entries that ended with an
+  inline `;comment`.**  The sample INI documented the format
+  `.pdf={CLSID} ; Friendly name`, exactly the same shape the
+  discovery report produces for copy-paste — but the parser passed
+  the value, comment and all, straight to `CLSIDFromString`, which
+  is strict about trailing characters and silently dropped the
+  entry.  The override therefore had no effect even though the user
+  had written it correctly per the docs.  Values are now stripped
+  of any inline `;…` tail and surrounding whitespace before being
+  parsed.  Each successfully-loaded override is also logged
+  (`PreviewHandlers override: .pdf -> {…}`), and each rejected
+  entry is logged as `REJECTED (bad CLSID)` so typos are easier
+  to spot.
+
+- **`ListGetDetectString` now returns `EXT="*"`** instead of a
+  hard-coded list of Office extensions.  Total Commander calls this
+  exported function the first time it needs to query the plugin's
+  detect string and stores the returned value in `wincmd.ini`,
+  overriding whatever `defaultextension=` in `pluginst.inf` set
+  initially.  The stale hard-coded list was the real reason new
+  file types (PDF, HTML, …) were not picked up automatically on
+  fresh installs — they simply weren't in the string TC saw.  With
+  the new value, fresh installs route every file through the plugin
+  DLL's `HasPreviewHandlerForExt` registry probe, exactly the way
+  the new universal-handler architecture was meant to work.
+
+  Existing users coming from v2.1 or earlier need a one-off
+  configuration refresh to pick this up — see *Notes* below.
+- **`ListLoadNextW` no longer leaves a stale preview on screen when
+  navigating (`n` / `p` keys in the Lister) to a file the plugin
+  can't handle.**  The previous code returned the wrong constant on
+  the failure path — `0` instead of `1` — so Total Commander
+  interpreted "no handler for this file" as success, kept the
+  Lister window open, and left the prior file's rendering visible
+  in it.  The plugin now uses the documented `LISTPLUGIN_OK` (0) /
+  `LISTPLUGIN_ERROR` (1) constants (added to `listplug.h` for
+  clarity) and returns `LISTPLUGIN_ERROR` whenever it can't load
+  the requested file — at which point TC closes the Lister and
+  routes the file to the next configured plugin or its built-in
+  viewer.  The success path was also corrected from `1` to `0`;
+  this had been silently wrong since the plugin's first release but
+  TC's tolerance for either value masked it.
+- **`pluginst.inf` no longer ships either `detect=` or
+  `defaultextension=`.**  The former is recognised by Total Commander
+  only for archive (WCX) plugins; the latter would, if TC reads it at
+  install time, write a finite EXT="…" list to `wincmd.ini` that
+  would then conflict with the `EXT="*"` value the plugin's
+  `ListGetDetectString` returns on first use.  `ListGetDetectString`
+  is now the single source of truth — the plugin DLL itself decides
+  which files TC should ask it about, and the answer is "all of
+  them; my registry probe will decline the ones I can't render".
+
+### Notes
+
+- **Upgrading from v2.1.0 or earlier requires a one-off configuration
+  refresh to enable the new universal file-type support.**  Total
+  Commander does not overwrite an already-stored detect string when
+  a plugin's DLL is replaced — even if `ListGetDetectString` would
+  return something different — so existing installs keep the old
+  Office-only detect string and never get asked about PDF, HTML, or
+  the other newly-supported file types.
+
+  Two ways to refresh it:
+
+  1. **Remove and re-add the plugin** in *Total Commander →
+     Configuration → Options → Plugins → Lister plugins →
+     Configure*.  On the next file preview, TC will ask the new
+     plugin DLL for its detect string and store `EXT="*"`.
+  2. **Edit `wincmd.ini` directly** — Total Commander's GUI does
+     not expose a way to change a Lister plugin's detect string at
+     all, so this is the only way without going through Remove /
+     Add.  Close TC, edit the `<N>_detect=` line under
+     `[ListerPlugins]` (where `<N>` is the slot whose
+     `<N>=` line is the TCOfficeView DLL path) to `EXT="*"`, save,
+     and reopen TC.
+
+  Both procedures are spelled out step-by-step in *README.md →
+  Upgrading from an Earlier Version*.
+
 ## [v2.1.0] – 2026-05-23
 
 ### Added
@@ -354,6 +547,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[v2.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...v2.0.0
 [v1.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...v1.0.0

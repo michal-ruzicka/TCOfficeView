@@ -2,27 +2,35 @@
 // Copyright 2026 Michal Růžička <ruzicka.mich@gmail.com>
 
 /*
- * TCOfficeView.cpp - Total Commander Lister plugin for MS Office documents.
+ * TCOfficeView.cpp - Total Commander Lister plugin for files that have a
+ *                    Windows Preview Handler registered (Office docs,
+ *                    PDF, MSG, anything Explorer's Alt+P pane can show).
  *
  * Flow:
  *   1. TC calls ListLoad / ListLoadW with a file path and the parent HWND.
- *   2. The plugin creates a child window inside that parent (rendering target).
- *   3. It creates a named pipe (server side, overlapped) and spawns
+ *   2. The plugin does a fast registry probe (HasPreviewHandlerForExt)
+ *      to see whether the extension has any preview handler at all.  If
+ *      not, it returns nullptr immediately — TC then moves on to the
+ *      next configured Lister plugin or its built-in viewer, without
+ *      paying the host's cold-start cost for a file we can't render.
+ *   3. The plugin creates a child window inside that parent (rendering target).
+ *   4. It creates a named pipe (server side, overlapped) and spawns
  *      TCOfficeViewHost.exe with --hwnd <child> --pipe <name>.
- *   4. ConnectNamedPipe waits with a 5-second timeout; if the host process
+ *   5. ConnectNamedPipe waits with a 5-second timeout; if the host process
  *      exits before connecting, the wait returns early.
- *   5. Once connected, the plugin sends "LOAD <path>". The host CoCreateInstances
+ *   6. Once connected, the plugin sends "LOAD <path>". The host CoCreateInstances
  *      the registered IPreviewHandler for the extension and renders into the
  *      child HWND.
- *   6. On WM_SIZE the plugin coalesces resize events (50 ms timer) and
+ *   7. On WM_SIZE the plugin coalesces resize events (50 ms timer) and
  *      forwards them as RESIZE <w> <h>.
- *   7. ListCloseWindow sends CLOSE and waits briefly for the host to exit.
+ *   8. ListCloseWindow sends CLOSE and waits briefly for the host to exit.
  */
 
 #include "listplug.h"
 #include <windows.h>
 #include <string>
 #include <map>
+#include <set>          // deny list of extensions from [PreviewHandlers]
 #include <mutex>
 #include <sstream>
 
@@ -95,6 +103,219 @@ static std::wstring Utf8ToWide(const char* utf8)
     std::wstring w(static_cast<size_t>(n - 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], n);
     return w;
+}
+
+// ---------------------------------------------------------------------------
+// Preview-handler registry probe.
+//
+// Mirrors the host's FindPreviewHandlerClsid lookup chain — direct shellex,
+// default ProgID, OpenWithProgids, SystemFileAssociations\<ext>,
+// SystemFileAssociations\<PerceivedType> — but stops at the first positive
+// hit and returns just a bool.  Lets ListLoadW reject files with no
+// registered handler before spawning the host process: TC then moves on
+// to the next Lister plugin or its built-in viewer.
+//
+// Kept deliberately in lock-step with the host's version (TCOfficeViewHost
+// .cpp::FindPreviewHandlerClsid) — both must consult the same set of
+// registry locations or we'd either spawn the host for files it can't
+// preview, or hand control back to TC for files we could.
+// ---------------------------------------------------------------------------
+
+static const wchar_t* kPreviewHandlerCategoryStr =
+    L"{8895b1c6-b41f-4c1c-a562-0d564250836f}";
+
+static bool RegKeyExists(HKEY root, LPCWSTR subPath)
+{
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(root, subPath, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return false;
+    RegCloseKey(hKey);
+    return true;
+}
+
+static bool RegReadDefaultString(HKEY root, LPCWSTR subPath, std::wstring& out)
+{
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(root, subPath, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return false;
+    wchar_t buf[256] = {};
+    DWORD cb = sizeof(buf);
+    DWORD type = 0;
+    LONG rc = RegQueryValueExW(hKey, nullptr, nullptr, &type,
+                               reinterpret_cast<BYTE*>(buf), &cb);
+    RegCloseKey(hKey);
+    if (rc != ERROR_SUCCESS) return false;
+    if (type != REG_SZ && type != REG_EXPAND_SZ) return false;
+    out = buf;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Per-extension deny list, populated from [PreviewHandlers] in the INI.
+//
+// An entry of the form
+//   .pdf=
+// (extension followed by '=' with no CLSID value) tells the plugin to
+// behave as if no preview handler exists for that extension — so
+// ListLoadW returns nullptr without spawning the host and Total
+// Commander moves the file to the next configured Lister plugin or
+// its built-in viewer.
+//
+// Re-read from the INI on every ListLoadW / ListLoadNextW call so
+// changes take effect immediately without restarting Total Commander.
+// The host parses the same section independently and also honours the
+// deny list inside FindPreviewHandlerClsid (defence in depth).
+// ---------------------------------------------------------------------------
+
+static std::set<std::wstring> g_deniedExtensions;
+
+// Locate the first existing INI file using the same lookup order the
+// host uses: per-user override under %APPDATA%\GHISLER first, then the
+// system-wide copy shipped alongside the plugin.  Returns an empty
+// string if neither exists.
+static std::wstring ResolveActiveIniPath()
+{
+    DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+    if (needed > 0)
+    {
+        std::wstring appdata(needed, L'\0');
+        DWORD got = GetEnvironmentVariableW(L"APPDATA", appdata.data(), needed);
+        if (got > 0 && got < needed)
+        {
+            appdata.resize(got);
+            std::wstring p = appdata + L"\\GHISLER\\TCOfficeView.ini";
+            if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+        }
+    }
+    std::wstring p = GetPluginDir() + L"\\TCOfficeView.ini";
+    if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    return L"";
+}
+
+static void LoadDeniedExtensions()
+{
+    g_deniedExtensions.clear();
+
+    const std::wstring iniPath = ResolveActiveIniPath();
+    if (iniPath.empty()) return;
+
+    constexpr DWORD kSectionBufWChars = 8192;
+    auto* buf = new wchar_t[kSectionBufWChars]();
+    DWORD got = GetPrivateProfileSectionW(L"PreviewHandlers",
+                                          buf, kSectionBufWChars,
+                                          iniPath.c_str());
+    if (got > 0)
+    {
+        auto trim = [](std::wstring& s) {
+            while (!s.empty() && (s.back() == L' ' || s.back() == L'\t'))
+                s.pop_back();
+            size_t lead = 0;
+            while (lead < s.size() && (s[lead] == L' ' || s[lead] == L'\t'))
+                ++lead;
+            if (lead) s.erase(0, lead);
+        };
+
+        for (const wchar_t* p = buf; *p; p += wcslen(p) + 1)
+        {
+            const wchar_t* eq = wcschr(p, L'=');
+            if (!eq || eq == p) continue;
+
+            std::wstring key(p, eq - p);
+            std::wstring val(eq + 1);
+
+            // Inline ';comment' stripped from value, then both sides trimmed.
+            auto semi = val.find(L';');
+            if (semi != std::wstring::npos) val.erase(semi);
+            trim(key);
+            trim(val);
+
+            // Lowercase key, ensure leading dot.
+            for (auto& c : key) c = (wchar_t)towlower(c);
+            if (!key.empty() && key[0] != L'.') key.insert(0, L".");
+
+            // Only "extension=" with no CLSID counts as a deny entry.
+            // Non-empty values are CLSID overrides handled by the host.
+            if (key.size() >= 2 && val.empty())
+                g_deniedExtensions.insert(key);
+        }
+    }
+    delete[] buf;
+}
+
+static bool HasPreviewHandlerForExt(LPCWSTR path)
+{
+    LPCWSTR dot = wcsrchr(path, L'.');
+    if (!dot || !dot[1]) return false;
+
+    const std::wstring ext  = dot;                                                  // ".docx"
+    const std::wstring tail = std::wstring(L"\\shellex\\") + kPreviewHandlerCategoryStr;
+
+    // INI deny list takes priority over the registry — if the user
+    // listed this extension under [PreviewHandlers] with an empty
+    // value, we behave as if no handler were registered and let
+    // Total Commander route the file to the next configured plugin.
+    LoadDeniedExtensions();
+    if (!g_deniedExtensions.empty())
+    {
+        std::wstring lowered = ext;
+        for (auto& c : lowered) c = (wchar_t)towlower(c);
+        if (g_deniedExtensions.count(lowered)) return false;
+    }
+
+    // 1. Direct on extension
+    if (RegKeyExists(HKEY_CLASSES_ROOT, (ext + tail).c_str())) return true;
+
+    // 2. Via default ProgID
+    {
+        std::wstring progId;
+        if (RegReadDefaultString(HKEY_CLASSES_ROOT, ext.c_str(), progId) && !progId.empty())
+            if (RegKeyExists(HKEY_CLASSES_ROOT, (progId + tail).c_str()))
+                return true;
+    }
+
+    // 3. Via OpenWithProgids
+    {
+        const std::wstring owpPath = ext + L"\\OpenWithProgids";
+        HKEY hOwp = nullptr;
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, owpPath.c_str(), 0, KEY_READ, &hOwp)
+                == ERROR_SUCCESS)
+        {
+            wchar_t name[512] = {};
+            DWORD   nameLen   = ARRAYSIZE(name);
+            for (DWORD idx = 0;
+                 RegEnumValueW(hOwp, idx, name, &nameLen,
+                               nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+                 ++idx, nameLen = ARRAYSIZE(name))
+            {
+                if (!name[0]) continue;
+                if (RegKeyExists(HKEY_CLASSES_ROOT, (std::wstring(name) + tail).c_str()))
+                {
+                    RegCloseKey(hOwp);
+                    return true;
+                }
+            }
+            RegCloseKey(hOwp);
+        }
+    }
+
+    // 4. SystemFileAssociations\<ext>
+    if (RegKeyExists(HKEY_CLASSES_ROOT,
+                     (L"SystemFileAssociations\\" + ext + tail).c_str())) return true;
+
+    // 5. SystemFileAssociations\<PerceivedType>
+    {
+        std::wstring perceivedType;
+        if (RegReadDefaultString(HKEY_CLASSES_ROOT,
+                                 (ext + L"\\PerceivedType").c_str(),
+                                 perceivedType) && !perceivedType.empty())
+        {
+            if (RegKeyExists(HKEY_CLASSES_ROOT,
+                             (L"SystemFileAssociations\\" + perceivedType + tail).c_str()))
+                return true;
+        }
+    }
+
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +587,15 @@ static void TerminateSession(PreviewSession* session)
 
 HWND __stdcall ListLoadW(HWND ParentWin, wchar_t* FileToLoad, int /*ShowFlags*/)
 {
+    if (!FileToLoad) return nullptr;
+
+    // Decline upfront if no preview handler is registered for this
+    // extension.  TC then moves on to the next Lister plugin or its
+    // built-in viewer.  This is what makes the plugin's detect string
+    // EXT="*" non-intrusive: we get asked about every file but only
+    // claim the ones we can actually render.
+    if (!HasPreviewHandlerForExt(FileToLoad)) return nullptr;
+
     EnsureWindowClass();
 
     RECT rc = {};
@@ -411,7 +641,15 @@ HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
 int __stdcall ListLoadNextW(HWND /*ParentWin*/, HWND PluginWin,
                             wchar_t* FileToLoad, int /*ShowFlags*/)
 {
-    if (!FileToLoad) return 0;
+    if (!FileToLoad) return LISTPLUGIN_ERROR;
+
+    // No registered preview handler → fail the navigation.  TC then
+    // closes our Lister window and re-opens the file via the next
+    // configured plugin (or its built-in viewer).  Without this
+    // explicit failure the previous file's preview would silently
+    // stay on screen — TC would not know we couldn't display the
+    // new file.
+    if (!HasPreviewHandlerForExt(FileToLoad)) return LISTPLUGIN_ERROR;
 
     PreviewSession* session = nullptr;
     {
@@ -419,12 +657,12 @@ int __stdcall ListLoadNextW(HWND /*ParentWin*/, HWND PluginWin,
         auto it = g_sessions.find(PluginWin);
         if (it != g_sessions.end()) session = it->second;
     }
-    if (!session || session->hPipe == INVALID_HANDLE_VALUE) return 0;
+    if (!session || session->hPipe == INVALID_HANDLE_VALUE) return LISTPLUGIN_ERROR;
 
     std::wstring loadCmd = std::wstring(L"LOAD ") + FileToLoad + L"\n";
     BOOL ok = PipeWriteUtf16(session->hPipe, loadCmd);
     if (ok) session->currentFile = FileToLoad;
-    return ok ? 1 : 0;
+    return ok ? LISTPLUGIN_OK : LISTPLUGIN_ERROR;
 }
 
 int __stdcall ListLoadNext(HWND ParentWin, HWND PluginWin,
@@ -452,10 +690,17 @@ void __stdcall ListCloseWindow(HWND ListWin)
 
 void __stdcall ListGetDetectString(char* DetectString, int maxlen)
 {
-    const char* s = "EXT=\"DOCX\"|EXT=\"DOC\"|EXT=\"DOCM\"|"
-                    "EXT=\"XLSX\"|EXT=\"XLS\"|EXT=\"XLSM\"|EXT=\"XLSB\"|"
-                    "EXT=\"PPTX\"|EXT=\"PPT\"|EXT=\"PPTM\"|"
-                    "EXT=\"RTF\"|EXT=\"VSDX\"|EXT=\"MSG\"";
+    // EXT="*" → Total Commander asks us about every file the user
+    // presses F3 on.  The plugin DLL then runs HasPreviewHandlerForExt
+    // and either spawns the host or returns nullptr / LISTPLUGIN_ERROR
+    // so TC falls through to the next configured Lister plugin or its
+    // built-in viewer.  The pluginst.inf defaultextension= line is
+    // largely a fallback: TC overwrites the detect string in
+    // wincmd.ini with whatever this function returns the first time
+    // the plugin is asked about a file, so this string is what users
+    // actually see in *Plugins → Lister plugins → Configure → Detect
+    // string*.
+    const char* s = "EXT=\"*\"";
     strncpy_s(DetectString, maxlen, s, _TRUNCATE);
 }
 

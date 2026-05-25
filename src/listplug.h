@@ -27,6 +27,21 @@
 #define lc_selectall   3
 #define lc_setpercent  4
 
+// ListLoadNext return codes.  Per the TC plugin writers' guide:
+//
+//   LISTPLUGIN_OK    (0)  — file was loaded successfully; TC keeps the
+//                           Lister window and displays it.
+//   LISTPLUGIN_ERROR (1)  — file could not be loaded; TC CLOSES the
+//                           Lister window and re-opens the file with
+//                           the next configured Lister plugin or its
+//                           built-in viewer.
+//
+// Note: these constants are NOT in TC's stock listplug.h — they live
+// only in the prose documentation — but the numeric convention is
+// what TC enforces at run time.
+#define LISTPLUGIN_OK    0
+#define LISTPLUGIN_ERROR 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
