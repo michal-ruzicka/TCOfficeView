@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-generated discovery report at
+  `%APPDATA%\GHISLER\TCOfficeView.available-handlers.txt`.**  Each
+  time the host process starts, a low-priority background thread
+  enumerates `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`
+  for every installed preview handler and walks `HKCR\.*` for every
+  extension that currently resolves to one, and writes a human-
+  readable, UTF-8 text file with:
+
+  - **Section 1** — every installed preview handler on the machine,
+    sorted by friendly name, with its CLSID alongside (the master
+    pick-list).
+  - **Section 2** — the current per-extension assignment for every
+    file type that has a registered handler, preformatted as
+    commented-out INI lines (`;.pdf={CLSID} ; Friendly name`)
+    sorted by extension and ready to copy into the
+    `[PreviewHandlers]` section of `TCOfficeView.ini` — uncomment a
+    row, swap the CLSID for one of the alternatives from section 1
+    above.
+
+  Written atomically via a `.tmp` file + `MoveFileExW`, so the
+  report is never observed half-written.  Failure (no `%APPDATA%`,
+  destination locked by an editor, …) is logged and silently
+  skipped — the report is a convenience, not a requirement for the
+  plugin to function.
+
+- **`[PreviewHandlers]` INI section for per-extension CLSID overrides.**
+  When several preview handlers are installed for the same file type
+  (e.g. both Microsoft Edge and Adobe Reader register one for `.pdf`,
+  whichever was installed last wins system-wide), the user can now
+  pin a specific handler for this plugin only by writing
+  `<.ext>=<CLSID>` in the INI:
+
+  ```ini
+  [PreviewHandlers]
+  .pdf={3A84F9C2-6164-485C-A7D9-4B27F8AC009E}
+  ```
+
+  Override entries are consulted before the standard registry lookup
+  chain; the system-wide registration is the fallback when no override
+  matches.  Bad CLSIDs are silently ignored at load time.  Explorer's
+  preview pane and other applications keep using whatever Windows
+  picked as the system default — the override is scoped to
+  TCOfficeView only.  The shipped sample INI documents the format and
+  points at the
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`
+  registry key where every installed handler is enumerated with its
+  CLSID and friendly name.
+
 - **Universal Preview Handler support (PDF, EML, anything Explorer's
   Alt+P pane can show).**  The plugin advertises a comprehensive
   default extension list (`defaultextension=DOC,DOCX,DOCM,RTF,XLS,XLSX,

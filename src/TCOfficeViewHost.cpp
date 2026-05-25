@@ -51,6 +51,8 @@
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include <map>             // [PreviewHandlers] override table
+#include <algorithm>       // std::sort in the available-handlers report
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
@@ -99,6 +101,17 @@ static int          g_fontSize = 12;
 static Mode         g_modeWord       = Mode::QuickSwitchable;   // default: quick + button
 static Mode         g_modeExcel      = Mode::QuickSwitchable;
 static Mode         g_modePowerPoint = Mode::QuickSwitchable;
+
+// Per-extension preview-handler CLSID overrides from the INI's
+// [PreviewHandlers] section.  Keys are lowercase extensions with the
+// leading dot ("`.pdf`"), values are the raw CLSID string in braces
+// ("`{1531D583-...}`").  Consulted first by FindPreviewHandlerClsid;
+// the system registry chain is the fallback when no override matches.
+//
+// Use case: multiple PDF preview handlers are installed (Edge plus
+// Adobe Reader, for example) and the user wants this plugin to pick
+// one regardless of which one Windows considers the system default.
+static std::map<std::wstring, std::wstring> g_extensionOverrides;
 
 static std::wstring ExpandEnv(LPCWSTR s)
 {
@@ -164,6 +177,61 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     g_modeWord       = readMode(L"Word",       Mode::QuickSwitchable);
     g_modeExcel      = readMode(L"Excel",      Mode::QuickSwitchable);
     g_modePowerPoint = readMode(L"PowerPoint", Mode::QuickSwitchable);
+
+    // [PreviewHandlers] — per-extension CLSID overrides.
+    //
+    // Format inside the INI:
+    //   [PreviewHandlers]
+    //   .pdf={1531D583-8375-4D3F-B5FB-D23BBD169F22}
+    //   .msg={70AE7BC8-D953-409F-9DC2-2BE5F77AF6AB}
+    //
+    // Keys are extensions (with or without leading dot, case-insensitive).
+    // Values are full GUIDs in braces.  Bad or unparseable CLSIDs are
+    // ignored at load time (logged at the next opportunity).
+    //
+    // We read the entire section with GetPrivateProfileSectionW and
+    // walk the returned double-null-terminated key=value pairs ourselves.
+    g_extensionOverrides.clear();
+    {
+        constexpr DWORD kSectionBufWChars = 8192;
+        auto* sectionBuf = new wchar_t[kSectionBufWChars]();
+        DWORD got = GetPrivateProfileSectionW(L"PreviewHandlers",
+                                              sectionBuf, kSectionBufWChars,
+                                              iniPath.c_str());
+        if (got > 0)
+        {
+            for (const wchar_t* p = sectionBuf; *p; p += wcslen(p) + 1)
+            {
+                const wchar_t* eq = wcschr(p, L'=');
+                if (!eq || eq == p) continue;
+
+                std::wstring key(p, eq - p);
+                std::wstring val(eq + 1);
+
+                // Normalise key: trim, lowercase, ensure leading dot.
+                while (!key.empty() && (key.back() == L' ' || key.back() == L'\t'))
+                    key.pop_back();
+                size_t lead = 0;
+                while (lead < key.size() && (key[lead] == L' ' || key[lead] == L'\t'))
+                    ++lead;
+                if (lead) key.erase(0, lead);
+                for (auto& c : key) c = (wchar_t)towlower(c);
+                if (!key.empty() && key[0] != L'.') key.insert(0, L".");
+
+                // Validate the CLSID round-trips; reject garbage.
+                CLSID dummy;
+                if (key.size() >= 2 && SUCCEEDED(CLSIDFromString(val.c_str(), &dummy)))
+                {
+                    g_extensionOverrides[key] = val;
+                }
+                // (Invalid entries are silently dropped here; we log them
+                // on first use from FindPreviewHandlerClsid where HostLog
+                // is already armed.)
+            }
+        }
+        delete[] sectionBuf;
+    }
+
     return true;
 }
 
@@ -584,7 +652,11 @@ static bool ReadDefaultString(HKEY root, LPCWSTR subPath, std::wstring& out)
     return true;
 }
 
-static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
+// System-only lookup chain — no INI override.  Used both by the public
+// FindPreviewHandlerClsid wrapper (as the fallback when no override matches)
+// and by the available-handlers report generator (which wants to show what
+// the system would do without any of our overrides in the picture).
+static HRESULT FindSystemPreviewHandlerClsid(LPCWSTR path, CLSID* out)
 {
     LPCWSTR dot = wcsrchr(path, L'.');
     if (!dot || !dot[1]) return E_INVALIDARG;
@@ -692,6 +764,324 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
 
     HostLog(L"FindPreviewHandlerClsid: no preview handler found for '%s'", ext.c_str());
     return REGDB_E_CLASSNOTREG;
+}
+
+// Public lookup: tries the INI [PreviewHandlers] override first, then
+// falls back to the system-wide registry chain.  Used for actual file
+// previews — wherever we'd resolve "what handler do I instantiate for
+// this file" the override gets a chance to redirect us.
+static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
+{
+    LPCWSTR dot = wcsrchr(path, L'.');
+    if (!dot || !dot[1]) return E_INVALIDARG;
+
+    // INI override.  Lets the user pick a specific preview handler for
+    // an extension regardless of what's registered system-wide (typical
+    // use: Adobe Reader claimed .pdf but the user prefers Edge's PDF
+    // handler for our preview pane).  Bad CLSIDs were already filtered
+    // out at config load, so a parse failure here can only mean a CLSID
+    // string that was valid syntactically but isn't actually a
+    // registered COM class — we still try it and let CoCreateInstance
+    // complain if so.
+    if (!g_extensionOverrides.empty())
+    {
+        std::wstring ext = dot;
+        for (auto& c : ext) c = (wchar_t)towlower(c);
+        auto it = g_extensionOverrides.find(ext);
+        if (it != g_extensionOverrides.end())
+        {
+            HRESULT hr = CLSIDFromString(it->second.c_str(), out);
+            HostLog(L"FindPreviewHandlerClsid: '%s' resolved via INI override "
+                    L"PreviewHandlers=%s (0x%08lX)",
+                    ext.c_str(), it->second.c_str(), static_cast<long>(hr));
+            if (SUCCEEDED(hr)) return S_OK;
+            // Fall through to the registry-based chain on parse failure.
+        }
+    }
+
+    return FindSystemPreviewHandlerClsid(path, out);
+}
+
+// ---------------------------------------------------------------------------
+// Available-handlers report.
+//
+// Generates a human-readable, copy-pasteable file at
+// %APPDATA%\GHISLER\TCOfficeView.available-handlers.txt every time the
+// host starts.  Two sections:
+//
+//   1) Every preview handler installed on this machine (the master
+//      list users pick CLSIDs from), enumerated from
+//      HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers.
+//   2) For every file extension that has *any* preview handler today,
+//      the CLSID currently in effect — preformatted as commented-out
+//      INI lines so users can copy a row into
+//      [PreviewHandlers] in TCOfficeView.ini, uncomment it, and
+//      change the CLSID to one of the alternatives from section 1.
+//
+// Runs on a background thread so it doesn't add to F3 cold-start
+// latency.  Atomic write via .tmp + MoveFileExW.
+// ---------------------------------------------------------------------------
+
+// Enumerate HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers
+// into a map keyed by uppercase CLSID-with-braces.  Values are friendly
+// names ("Microsoft Edge PDF Preview Handler", …) as registered there.
+static std::map<std::wstring, std::wstring> EnumerateInstalledPreviewHandlersFromHklm()
+{
+    std::map<std::wstring, std::wstring> result;
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers",
+                      0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return result;
+
+    for (DWORD idx = 0;; ++idx)
+    {
+        wchar_t name[256] = {};
+        wchar_t data[1024] = {};
+        DWORD nameLen = ARRAYSIZE(name);
+        DWORD dataBytes = sizeof(data) - sizeof(wchar_t);   // leave room for terminator
+        DWORD type = 0;
+        LONG rc = RegEnumValueW(hKey, idx, name, &nameLen, nullptr,
+                                &type, reinterpret_cast<BYTE*>(data), &dataBytes);
+        if (rc == ERROR_NO_MORE_ITEMS) break;
+        if (rc != ERROR_SUCCESS) continue;
+        if (type != REG_SZ && type != REG_EXPAND_SZ) continue;
+
+        std::wstring clsid(name);
+        // Normalise CLSID to uppercase for stable map keys.
+        for (auto& c : clsid) c = (wchar_t)towupper(c);
+        result[clsid] = std::wstring(data);
+    }
+    RegCloseKey(hKey);
+    return result;
+}
+
+// Walk every "*.ext" key under HKEY_CLASSES_ROOT and, for each one that
+// resolves to a registered preview handler via the standard system
+// lookup chain (no INI overrides), record extension → CLSID.
+//
+// Keys are normalised to lowercase ".ext" form; CLSIDs are uppercase
+// {…} form so they cross-reference cleanly with the HKLM map above.
+static std::map<std::wstring, std::wstring> EnumerateSystemHandlerAssignments()
+{
+    std::map<std::wstring, std::wstring> result;
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, L"", 0,
+                      KEY_READ | KEY_ENUMERATE_SUB_KEYS, &hKey) != ERROR_SUCCESS)
+        return result;
+
+    for (DWORD idx = 0;; ++idx)
+    {
+        wchar_t subKey[256] = {};
+        DWORD subKeyLen = ARRAYSIZE(subKey);
+        LONG rc = RegEnumKeyExW(hKey, idx, subKey, &subKeyLen,
+                                nullptr, nullptr, nullptr, nullptr);
+        if (rc == ERROR_NO_MORE_ITEMS) break;
+        if (rc != ERROR_SUCCESS) continue;
+        if (subKey[0] != L'.') continue;                    // not an extension entry
+
+        // Synthesise a fake path so we can reuse FindSystemPreviewHandlerClsid.
+        std::wstring fakePath = L"x";
+        fakePath += subKey;
+
+        CLSID clsid;
+        if (FindSystemPreviewHandlerClsid(fakePath.c_str(), &clsid) == S_OK)
+        {
+            wchar_t clsidStr[64] = {};
+            if (StringFromGUID2(clsid, clsidStr, ARRAYSIZE(clsidStr)) > 0)
+            {
+                std::wstring ext = subKey;
+                for (auto& c : ext)     c = (wchar_t)towlower(c);    // ".PDF" → ".pdf"
+                std::wstring clsidUpper(clsidStr);
+                for (auto& c : clsidUpper) c = (wchar_t)towupper(c);
+                result[ext] = clsidUpper;
+            }
+        }
+    }
+    RegCloseKey(hKey);
+    return result;
+}
+
+// Append `s` to `outUtf8` as UTF-8 bytes.
+static void AppendWideAsUtf8(std::string& outUtf8, const std::wstring& s)
+{
+    if (s.empty()) return;
+    int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(),
+                                static_cast<int>(s.size()),
+                                nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return;
+    size_t start = outUtf8.size();
+    outUtf8.resize(start + n);
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+                        outUtf8.data() + start, n, nullptr, nullptr);
+}
+
+static void AppendLineUtf8(std::string& outUtf8, const std::wstring& s)
+{
+    AppendWideAsUtf8(outUtf8, s);
+    outUtf8 += "\r\n";
+}
+
+// Compose and write %APPDATA%\GHISLER\TCOfficeView.available-handlers.txt.
+// Best-effort: any failure (missing APPDATA, write error, file locked by
+// an editor) is logged and ignored — the report is a convenience, not a
+// requirement for the plugin to work.
+static void WriteAvailableHandlersReportSta()
+{
+    // Resolve %APPDATA%\GHISLER as the destination directory.
+    DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+    if (needed == 0) return;
+    std::wstring appdata(needed, L'\0');
+    DWORD got = GetEnvironmentVariableW(L"APPDATA", appdata.data(), needed);
+    if (got == 0 || got >= needed) return;
+    appdata.resize(got);
+
+    const std::wstring destDir  = appdata + L"\\GHISLER";
+    const std::wstring destPath = destDir + L"\\TCOfficeView.available-handlers.txt";
+    const std::wstring tmpPath  = destPath + L".tmp";
+
+    SHCreateDirectoryExW(nullptr, destDir.c_str(), nullptr);
+
+    auto installed   = EnumerateInstalledPreviewHandlersFromHklm();
+    auto assignments = EnumerateSystemHandlerAssignments();
+
+    HostLog(L"AvailableHandlers report: %zu installed, %zu extension assignments",
+            installed.size(), assignments.size());
+
+    // Build the report content in memory as UTF-8.
+    std::string body;
+    body.reserve(8192);
+    // UTF-8 BOM so Notepad and other editors detect encoding correctly.
+    body.append("\xEF\xBB\xBF");
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t header[256] = {};
+    _snwprintf_s(header, _TRUNCATE,
+                 L"TCOfficeView — installed preview handlers and current per-extension assignments\r\n"
+                 L"Regenerated automatically every time the plugin host starts.\r\n"
+                 L"Last update: %04u-%02u-%02u %02u:%02u:%02u local time.\r\n",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    AppendWideAsUtf8(body, header);
+
+    AppendLineUtf8(body, L"");
+    AppendLineUtf8(body, L"================================================================");
+    AppendLineUtf8(body, L"1) Installed preview handlers on this machine");
+    AppendLineUtf8(body, L"================================================================");
+    AppendLineUtf8(body, L"   Source: HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers");
+    AppendLineUtf8(body, L"   Pick a CLSID below to override an extension's default handler");
+    AppendLineUtf8(body, L"   (use the value from the second column inside [PreviewHandlers]).");
+    AppendLineUtf8(body, L"");
+
+    if (installed.empty())
+    {
+        AppendLineUtf8(body, L"   (no preview handlers are registered on this machine)");
+    }
+    else
+    {
+        // Sort by friendly name for predictable, scannable output.
+        std::vector<std::pair<std::wstring, std::wstring>> byName;     // (friendly, clsid)
+        byName.reserve(installed.size());
+        for (const auto& kv : installed) byName.emplace_back(kv.second, kv.first);
+        std::sort(byName.begin(), byName.end(),
+                  [](const auto& a, const auto& b) {
+                      return _wcsicmp(a.first.c_str(), b.first.c_str()) < 0;
+                  });
+
+        size_t nameColWidth = 0;
+        for (const auto& p : byName)
+            if (p.first.size() > nameColWidth) nameColWidth = p.first.size();
+        if (nameColWidth > 60) nameColWidth = 60;       // keep lines readable
+
+        for (const auto& p : byName)
+        {
+            std::wstring line = L"   " + p.first;
+            while (line.size() < nameColWidth + 6) line += L' ';
+            line += p.second;
+            AppendLineUtf8(body, line);
+        }
+    }
+
+    AppendLineUtf8(body, L"");
+    AppendLineUtf8(body, L"================================================================");
+    AppendLineUtf8(body, L"2) Current per-extension assignments (system-wide defaults)");
+    AppendLineUtf8(body, L"================================================================");
+    AppendLineUtf8(body, L"   These are the handlers TCOfficeView picks today for each file");
+    AppendLineUtf8(body, L"   type that has any preview handler registered, before any of");
+    AppendLineUtf8(body, L"   your INI overrides apply.  Each line is preformatted as a");
+    AppendLineUtf8(body, L"   commented-out INI entry — copy any line into");
+    AppendLineUtf8(body, L"   [PreviewHandlers] in %APPDATA%\\GHISLER\\TCOfficeView.ini,");
+    AppendLineUtf8(body, L"   remove the leading ';', then change the CLSID to one of the");
+    AppendLineUtf8(body, L"   handlers listed in section 1 above.");
+    AppendLineUtf8(body, L"");
+
+    if (assignments.empty())
+    {
+        AppendLineUtf8(body, L"   (no extensions have a registered preview handler)");
+    }
+    else
+    {
+        // Column width for the ".ext={CLSID}" part.
+        size_t lhsWidth = 0;
+        for (const auto& kv : assignments)
+        {
+            size_t w = kv.first.size() + 1 + kv.second.size() + 1;   // ext + "=" + clsid + ";"
+            if (w > lhsWidth) lhsWidth = w;
+        }
+
+        for (const auto& kv : assignments)
+        {
+            // Look up friendly name (uppercase key in installed map).
+            std::wstring friendlyName;
+            auto fnd = installed.find(kv.second);
+            if (fnd != installed.end()) friendlyName = fnd->second;
+
+            std::wstring line = L";" + kv.first + L"=" + kv.second;
+            while (line.size() < lhsWidth + 3) line += L' ';
+            if (!friendlyName.empty())
+            {
+                line += L" ; ";
+                line += friendlyName;
+            }
+            AppendLineUtf8(body, line);
+        }
+    }
+
+    // Atomic write: dump to .tmp, then MoveFileEx with REPLACE_EXISTING.
+    HANDLE h = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        HostLog(L"AvailableHandlers report: CreateFile('%s') failed err=%lu",
+                tmpPath.c_str(), GetLastError());
+        return;
+    }
+    DWORD written = 0;
+    BOOL writeOk = WriteFile(h, body.data(), static_cast<DWORD>(body.size()),
+                             &written, nullptr);
+    CloseHandle(h);
+    if (!writeOk || written != body.size())
+    {
+        HostLog(L"AvailableHandlers report: WriteFile failed err=%lu written=%lu/%zu",
+                GetLastError(), written, body.size());
+        DeleteFileW(tmpPath.c_str());
+        return;
+    }
+    if (!MoveFileExW(tmpPath.c_str(), destPath.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        HostLog(L"AvailableHandlers report: MoveFileEx failed err=%lu", GetLastError());
+        DeleteFileW(tmpPath.c_str());
+        return;
+    }
+    HostLog(L"AvailableHandlers report: wrote '%s'", destPath.c_str());
+}
+
+static DWORD WINAPI AvailableHandlersReportThread(LPVOID)
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    WriteAvailableHandlersReportSta();
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -3220,6 +3610,21 @@ int wmain(int argc, wchar_t** argv)
     // exited abnormally.  Cheap (one FindFirstFile + a few PID checks)
     // and keeps long-lived TC sessions from accumulating orphans.
     CleanupOrphanedJunctionsAtStartup();
+
+    // Regenerate %APPDATA%\GHISLER\TCOfficeView.available-handlers.txt
+    // on a low-priority background thread.  The report lists every
+    // preview handler installed on the machine and every extension
+    // assignment in effect, preformatted as commented-out INI lines
+    // the user can copy into [PreviewHandlers] to override.  Fire-
+    // and-forget — if it doesn't finish before the host exits, the
+    // previous file just stays in place; we'll regenerate again next
+    // time a Lister session is opened.
+    if (HANDLE hReportThread = CreateThread(nullptr, 0,
+                                            AvailableHandlersReportThread,
+                                            nullptr, 0, nullptr))
+    {
+        CloseHandle(hReportThread);
+    }
 
     HRESULT hr = CoInitializeEx(nullptr,
                                 COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
