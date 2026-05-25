@@ -34,6 +34,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logged and silently skipped — the report is a convenience, not a
   requirement for the plugin to function.
 
+- **Per-extension deny in `[PreviewHandlers]` — write `.ext=` (empty
+  value) to skip an extension entirely.**  TCOfficeView then behaves
+  as if no preview handler existed for that file type: the plugin
+  DLL returns `nullptr` from `ListLoadW` / `LISTPLUGIN_ERROR` from
+  `ListLoadNextW`, Total Commander routes the file to the next
+  configured Lister plugin or its built-in viewer, and the host
+  process is never even spawned.  Useful when another Lister plugin
+  does a better job for a specific file type (e.g. a dedicated PDF
+  previewer) and the user wants to keep TCOfficeView for everything
+  else.
+
+  The plugin DLL parses its own copy of the section lazily on first
+  use and caches it for the DLL's lifetime (TC restart required to
+  pick up edits).  The host re-reads the section on every spawn and
+  honours the deny list inside `FindPreviewHandlerClsid` as a
+  defence-in-depth backstop in case the DLL ever forwards a file
+  for a denied extension.
+
 - **`[PreviewHandlers]` INI section for per-extension CLSID overrides.**
   When several preview handlers are installed for the same file type
   (e.g. both Microsoft Edge and Adobe Reader register one for `.pdf`,

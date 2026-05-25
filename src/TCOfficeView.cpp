@@ -30,6 +30,7 @@
 #include <windows.h>
 #include <string>
 #include <map>
+#include <set>          // deny list of extensions from [PreviewHandlers]
 #include <mutex>
 #include <sstream>
 
@@ -149,6 +150,98 @@ static bool RegReadDefaultString(HKEY root, LPCWSTR subPath, std::wstring& out)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Per-extension deny list, populated from [PreviewHandlers] in the INI.
+//
+// An entry of the form
+//   .pdf=
+// (extension followed by '=' with no CLSID value) tells the plugin to
+// behave as if no preview handler exists for that extension — so
+// ListLoadW returns nullptr without spawning the host and Total
+// Commander moves the file to the next configured Lister plugin or
+// its built-in viewer.
+//
+// Re-read from the INI on every ListLoadW / ListLoadNextW call so
+// changes take effect immediately without restarting Total Commander.
+// The host parses the same section independently and also honours the
+// deny list inside FindPreviewHandlerClsid (defence in depth).
+// ---------------------------------------------------------------------------
+
+static std::set<std::wstring> g_deniedExtensions;
+
+// Locate the first existing INI file using the same lookup order the
+// host uses: per-user override under %APPDATA%\GHISLER first, then the
+// system-wide copy shipped alongside the plugin.  Returns an empty
+// string if neither exists.
+static std::wstring ResolveActiveIniPath()
+{
+    DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+    if (needed > 0)
+    {
+        std::wstring appdata(needed, L'\0');
+        DWORD got = GetEnvironmentVariableW(L"APPDATA", appdata.data(), needed);
+        if (got > 0 && got < needed)
+        {
+            appdata.resize(got);
+            std::wstring p = appdata + L"\\GHISLER\\TCOfficeView.ini";
+            if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+        }
+    }
+    std::wstring p = GetPluginDir() + L"\\TCOfficeView.ini";
+    if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    return L"";
+}
+
+static void LoadDeniedExtensions()
+{
+    g_deniedExtensions.clear();
+
+    const std::wstring iniPath = ResolveActiveIniPath();
+    if (iniPath.empty()) return;
+
+    constexpr DWORD kSectionBufWChars = 8192;
+    auto* buf = new wchar_t[kSectionBufWChars]();
+    DWORD got = GetPrivateProfileSectionW(L"PreviewHandlers",
+                                          buf, kSectionBufWChars,
+                                          iniPath.c_str());
+    if (got > 0)
+    {
+        auto trim = [](std::wstring& s) {
+            while (!s.empty() && (s.back() == L' ' || s.back() == L'\t'))
+                s.pop_back();
+            size_t lead = 0;
+            while (lead < s.size() && (s[lead] == L' ' || s[lead] == L'\t'))
+                ++lead;
+            if (lead) s.erase(0, lead);
+        };
+
+        for (const wchar_t* p = buf; *p; p += wcslen(p) + 1)
+        {
+            const wchar_t* eq = wcschr(p, L'=');
+            if (!eq || eq == p) continue;
+
+            std::wstring key(p, eq - p);
+            std::wstring val(eq + 1);
+
+            // Inline ';comment' stripped from value, then both sides trimmed.
+            auto semi = val.find(L';');
+            if (semi != std::wstring::npos) val.erase(semi);
+            trim(key);
+            trim(val);
+
+            // Lowercase key, ensure leading dot.
+            for (auto& c : key) c = (wchar_t)towlower(c);
+            if (!key.empty() && key[0] != L'.') key.insert(0, L".");
+
+            // Only "extension=" with no CLSID counts as a deny entry.
+            // Non-empty values are CLSID overrides handled by the host.
+            if (key.size() >= 2 && val.empty())
+                g_deniedExtensions.insert(key);
+        }
+    }
+    delete[] buf;
+}
+
 static bool HasPreviewHandlerForExt(LPCWSTR path)
 {
     LPCWSTR dot = wcsrchr(path, L'.');
@@ -156,6 +249,18 @@ static bool HasPreviewHandlerForExt(LPCWSTR path)
 
     const std::wstring ext  = dot;                                                  // ".docx"
     const std::wstring tail = std::wstring(L"\\shellex\\") + kPreviewHandlerCategoryStr;
+
+    // INI deny list takes priority over the registry — if the user
+    // listed this extension under [PreviewHandlers] with an empty
+    // value, we behave as if no handler were registered and let
+    // Total Commander route the file to the next configured plugin.
+    LoadDeniedExtensions();
+    if (!g_deniedExtensions.empty())
+    {
+        std::wstring lowered = ext;
+        for (auto& c : lowered) c = (wchar_t)towlower(c);
+        if (g_deniedExtensions.count(lowered)) return false;
+    }
 
     // 1. Direct on extension
     if (RegKeyExists(HKEY_CLASSES_ROOT, (ext + tail).c_str())) return true;

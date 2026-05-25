@@ -52,6 +52,7 @@
 #include <string>
 #include <vector>
 #include <map>             // [PreviewHandlers] override table
+#include <set>             // [PreviewHandlers] deny list
 #include <algorithm>       // std::sort in the available-handlers report
 
 #pragma comment(lib, "ole32.lib")
@@ -112,6 +113,17 @@ static Mode         g_modePowerPoint = Mode::QuickSwitchable;
 // Adobe Reader, for example) and the user wants this plugin to pick
 // one regardless of which one Windows considers the system default.
 static std::map<std::wstring, std::wstring> g_extensionOverrides;
+
+// Per-extension deny list from [PreviewHandlers] in the INI: an entry
+// of the form ".pdf=" (empty value) marks the extension as
+// "intentionally unhandled by this plugin".  FindPreviewHandlerClsid
+// returns REGDB_E_CLASSNOTREG for such extensions so they behave the
+// same as files for which no preview handler is registered at all —
+// the plugin DLL declines and Total Commander tries the next plugin.
+// The plugin DLL maintains its own parallel deny set so it can avoid
+// spawning the host process entirely; this set in the host is a
+// defence-in-depth backstop.
+static std::set<std::wstring> g_deniedExtensions;
 
 // Optional opt-in discovery aid (see [PreviewHandlers] ReportPath in
 // the INI).  When non-empty, the host writes a human-readable list of
@@ -230,6 +242,7 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     };
 
     g_extensionOverrides.clear();
+    g_deniedExtensions.clear();
     {
         constexpr DWORD kSectionBufWChars = 8192;
         auto* sectionBuf = new wchar_t[kSectionBufWChars]();
@@ -269,7 +282,18 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
                     continue;
                 }
 
-                // Validate the CLSID round-trips; reject garbage.
+                // Empty value → deny entry.  The extension is treated
+                // as if no preview handler were registered for it
+                // (FindPreviewHandlerClsid will return REGDB_E_CLASSNOTREG).
+                if (val.empty())
+                {
+                    g_deniedExtensions.insert(key);
+                    HostLog(L"  PreviewHandlers deny: %s (treated as no handler)",
+                            key.c_str());
+                    continue;
+                }
+
+                // Non-empty value: must parse as a CLSID.
                 CLSID dummy;
                 if (SUCCEEDED(CLSIDFromString(val.c_str(), &dummy)))
                 {
@@ -830,6 +854,24 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
     LPCWSTR dot = wcsrchr(path, L'.');
     if (!dot || !dot[1]) return E_INVALIDARG;
 
+    // Lowercased extension is used for both the deny set and the
+    // override map lookups below.
+    std::wstring ext = dot;
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+
+    // Deny list: ".ext=" (empty value) in [PreviewHandlers] makes the
+    // extension behave as if no handler were registered.  The plugin
+    // DLL applies the same check before forwarding LOAD to the host,
+    // so we should rarely reach this branch — it's a defence-in-depth
+    // backstop in case the DLL's cached deny list is somehow stale
+    // (e.g. INI edited after TC was launched).
+    if (!g_deniedExtensions.empty() && g_deniedExtensions.count(ext))
+    {
+        HostLog(L"FindPreviewHandlerClsid: '%s' DENIED via INI [PreviewHandlers]",
+                ext.c_str());
+        return REGDB_E_CLASSNOTREG;
+    }
+
     // INI override.  Lets the user pick a specific preview handler for
     // an extension regardless of what's registered system-wide (typical
     // use: Adobe Reader claimed .pdf but the user prefers Edge's PDF
@@ -840,8 +882,6 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
     // complain if so.
     if (!g_extensionOverrides.empty())
     {
-        std::wstring ext = dot;
-        for (auto& c : ext) c = (wchar_t)towlower(c);
         auto it = g_extensionOverrides.find(ext);
         if (it != g_extensionOverrides.end())
         {
