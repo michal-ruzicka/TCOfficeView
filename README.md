@@ -273,6 +273,51 @@ Full mode tradeoffs to be aware of:
   ribbon, for example, stays visible in the preview because hiding
   it would hijack your global Office settings.
 
+#### Preview Handler Overrides
+
+Under `[PreviewHandlers]` you can override which preview handler is used
+for a given file extension, or deny an extension entirely so Total
+Commander routes it to the next configured plugin.
+
+- **Pin a specific handler** — when several handlers are installed for
+the same type (e.g. both Edge and Adobe Reader register a PDF preview
+handler), write the CLSID you prefer:
+
+  ```ini
+  [PreviewHandlers]
+  .pdf={3A84F9C2-6164-485C-A7D9-4B27F8AC009E}
+  ```
+
+  The CLSID must include the braces. You can find the installed handlers
+  and their CLSIDs in the registry under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`, or
+  enable the discovery report (see below) to get a ready-to-copy list.
+
+- **Deny an extension** — write the extension with an empty value so the
+  plugin behaves as if no handler existed for that type. Total Commander
+  then passes the file to the next Lister plugin or its built-in viewer.
+  Useful when another plugin does a better job for a specific format.
+
+  ```ini
+  [PreviewHandlers]
+  .html=
+  .pdf=
+  ```
+
+  Changes take effect immediately — the INI is re-read on every preview.
+
+- **Discovery report** — set `ReportPath` to a writable file and the host
+  will regenerate it on every start-up, listing every installed handler
+  (with CLSID) and every extension assignment in effect, formatted as
+  commented-out INI lines ready to copy:
+
+  ```ini
+  [PreviewHandlers]
+  ReportPath=%APPDATA%\GHISLER\TCOfficeView.available-handlers.txt
+  ```
+
+  Turn it on while configuring overrides, then comment it out again.
+
 ### When No Preview Handler Is Registered
 
 If your machine has no Preview Handler at all for a given file type,
