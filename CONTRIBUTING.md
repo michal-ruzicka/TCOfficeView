@@ -101,9 +101,9 @@ spawning the host process the plugin DLL runs `HasPreviewHandlerForExt`
 (a registry walk mirroring the host's `FindPreviewHandlerClsid` lookup
 chain — direct shellex → default ProgID → `OpenWithProgids` →
 `SystemFileAssociations\<ext>` → `SystemFileAssociations\<PerceivedType>`)
-and returns `nullptr` from `ListLoadW` / `0` from `ListLoadNextW` when
-no handler is registered.  TC then routes the file to the next
-configured Lister plugin or its built-in viewer.
+and returns `nullptr` from `ListLoadW` / `LISTPLUGIN_ERROR` from
+`ListLoadNextW` when no handler is registered.  TC then routes the file
+to the next configured Lister plugin or its built-in viewer.
 
 This is why there is no per-format table in `TCOfficeView.cpp`: format
 support is whatever the user's machine has registered.  When adding a

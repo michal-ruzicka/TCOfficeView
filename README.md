@@ -100,7 +100,7 @@ installation:
 | Microsoft Excel       | XLS, XLSX, XLSM, XLSB |
 | Microsoft PowerPoint  | PPT, PPTX, PPTM |
 | Microsoft Visio       | VSD, VSDX |
-| Outlook / Windows built-in mail previewer | MSG, EML |
+| Outlook / Windows built-in mail previewer | MSG |
 | Microsoft Edge (built-in) / Adobe Acrobat Reader | PDF |
 | Adobe Photoshop (if installed) | PSD |
 | AutoCAD / DWG TrueView (if installed) | DWG, DXF |
@@ -297,7 +297,7 @@ previous installer) set originally.  This is fine for fresh installs
 (the plugin announces `EXT="*"` and TC picks it up automatically) but
 means upgraders from v2.1 or earlier keep their old detect string,
 which lists only the original Office extensions and **never asks the
-plugin about PDF, EML, PSD, DWG and the rest**.
+plugin about PDF, HTML, PSD, DWG and the rest**.
 
 To pick up the new universal behaviour, do one of the following:
 
@@ -342,10 +342,10 @@ detect string; it has to be changed in the configuration file.
 6. Save the file and reopen Total Commander.
 
 If you would rather keep a stricter, finite set of file types instead
-of `EXT="*"`, use this as the `_detect=` value:
+of `EXT="*"`, use this as the `<N>_detect=` value:
 
 ```
-EXT="DOC"|EXT="DOCX"|EXT="DOCM"|EXT="RTF"|EXT="XLS"|EXT="XLSX"|EXT="XLSM"|EXT="XLSB"|EXT="PPT"|EXT="PPTX"|EXT="PPTM"|EXT="VSD"|EXT="VSDX"|EXT="MSG"|EXT="EML"|EXT="PDF"
+EXT="DOC"|EXT="DOCX"|EXT="DOCM"|EXT="RTF"|EXT="XLS"|EXT="XLSX"|EXT="XLSM"|EXT="XLSB"|EXT="PPT"|EXT="PPTX"|EXT="PPTM"|EXT="VSD"|EXT="VSDX"|EXT="MSG"|EXT="HTML"|EXT="HTM"|EXT="PDF"
 ```
 
 With this list the plugin will be asked only about the common

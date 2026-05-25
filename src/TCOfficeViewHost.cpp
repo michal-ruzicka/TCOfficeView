@@ -863,8 +863,8 @@ static HRESULT FindPreviewHandlerClsid(LPCWSTR path, CLSID* out)
     // extension behave as if no handler were registered.  The plugin
     // DLL applies the same check before forwarding LOAD to the host,
     // so we should rarely reach this branch — it's a defence-in-depth
-    // backstop in case the DLL's cached deny list is somehow stale
-    // (e.g. INI edited after TC was launched).
+    // backstop in case the DLL's deny list is somehow stale
+    // (e.g. INI edited between the DLL's read and the host spawn).
     if (!g_deniedExtensions.empty() && g_deniedExtensions.count(ext))
     {
         HostLog(L"FindPreviewHandlerClsid: '%s' DENIED via INI [PreviewHandlers]",

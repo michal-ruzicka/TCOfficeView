@@ -7,50 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Universal Preview Handler support** is tha main enhancement of this release.
+
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
+
 ### Added
 
-- **Optional discovery report — set `[PreviewHandlers] ReportPath=<path>`
-  in the INI to enable.**  When the option is set, the host writes
-  (on a low-priority background thread, every time it starts) a
-  human-readable text file at the chosen location containing:
+- **Universal Preview Handler support (PDF, HTML, anything Explorer's
+  Alt+P pane can show).**  The plugin advertises support for all file
+  type (`EXT="*"`) so fresh installs work out of the box for the common 
+  formats; users who want truly universal support can switch the detect 
+  string in TC to `EXT="*"` (documented in README) and the plugin will 
+  be asked about every file.  A new registry probe in the plugin DLL
+  (`HasPreviewHandlerForExt`, mirroring the host's
+  `FindPreviewHandlerClsid` lookup chain — direct shellex → default
+  ProgID → `OpenWithProgids` → `SystemFileAssociations\<ext>` →
+  `SystemFileAssociations\<PerceivedType>`) decides at LOAD time
+  whether a Windows Preview Handler is actually registered for the
+  file's extension; if not, the plugin returns the "decline" value
+  so TC moves on to the next configured Lister plugin or its
+  built-in viewer.  Cost: one zero-allocation registry walk per
+  F3 / Ctrl+Q; no host process spawn for files we can't render.
 
-  - **Section 1** — every installed preview handler on the machine,
-    sorted by friendly name, with its CLSID alongside (the master
-    pick-list).  Source: `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`.
-  - **Section 2** — the current per-extension assignment for every
-    file type that has a registered handler (walked from `HKCR\.*`),
-    preformatted as commented-out INI lines
-    (`;.pdf={CLSID} ; Friendly name`) sorted by extension and ready
-    to copy into the `[PreviewHandlers]` section of
-    `TCOfficeView.ini` — uncomment a row, swap the CLSID for one of
-    the alternatives from section 1 above.
-
-  Written atomically via a `.tmp` file + `MoveFileExW`, so the
-  report is never observed half-written.  Off by default — the
-  registry walk is cheap but it's still wasted work on every Lister
-  session when the user isn't actively configuring overrides.  Turn
-  it on while setting up overrides, then comment the line out again.
-  Failure (path unwritable, destination locked by an editor, …) is
-  logged and silently skipped — the report is a convenience, not a
-  requirement for the plugin to function.
-
-- **Per-extension deny in `[PreviewHandlers]` — write `.ext=` (empty
-  value) to skip an extension entirely.**  TCOfficeView then behaves
-  as if no preview handler existed for that file type: the plugin
-  DLL returns `nullptr` from `ListLoadW` / `LISTPLUGIN_ERROR` from
-  `ListLoadNextW`, Total Commander routes the file to the next
-  configured Lister plugin or its built-in viewer, and the host
-  process is never even spawned.  Useful when another Lister plugin
-  does a better job for a specific file type (e.g. a dedicated PDF
-  previewer) and the user wants to keep TCOfficeView for everything
-  else.
-
-  The plugin DLL parses its own copy of the section lazily on first
-  use and caches it for the DLL's lifetime (TC restart required to
-  pick up edits).  The host re-reads the section on every spawn and
-  honours the deny list inside `FindPreviewHandlerClsid` as a
-  defence-in-depth backstop in case the DLL ever forwards a file
-  for a denied extension.
+  In practice this gives the user automatic support for **PDF** (via
+  Edge's built-in handler on Windows 10+, or Adobe Acrobat Reader if
+  installed), **MSG** (via Windows' built-in MAPI Mail Previewer),
+  and — with `EXT="*"` — Photoshop **PSD**, AutoCAD **DWG/DXF**,
+  Sketchup **SKP**, and anything else that ships a Preview Handler.
 
 - **`[PreviewHandlers]` INI section for per-extension CLSID overrides.**
   When several preview handlers are installed for the same file type
@@ -75,36 +62,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry key where every installed handler is enumerated with its
   CLSID and friendly name.
 
-- **Universal Preview Handler support (PDF, EML, anything Explorer's
-  Alt+P pane can show).**  The plugin advertises a comprehensive
-  default extension list (`defaultextension=DOC,DOCX,DOCM,RTF,XLS,XLSX,
-  XLSM,XLSB,PPT,PPTX,PPTM,VSD,VSDX,MSG,EML,PDF` in `pluginst.inf`) so
-  fresh installs work out of the box for the common formats; users
-  who want truly universal support can switch the detect string in TC
-  to `EXT="*"` (documented in README) and the plugin will be asked
-  about every file.  A new registry probe in the plugin DLL
-  (`HasPreviewHandlerForExt`, mirroring the host's
-  `FindPreviewHandlerClsid` lookup chain — direct shellex → default
-  ProgID → `OpenWithProgids` → `SystemFileAssociations\<ext>` →
-  `SystemFileAssociations\<PerceivedType>`) decides at LOAD time
-  whether a Windows Preview Handler is actually registered for the
-  file's extension; if not, the plugin returns the "decline" value
-  so TC moves on to the next configured Lister plugin or its
-  built-in viewer.  Cost: one zero-allocation registry walk per
-  F3 / Ctrl+Q; no host process spawn for files we can't render.
+- **Optional discovery report** — set `[PreviewHandlers] ReportPath=<path>`
+  in the INI to enable.  When the option is set, the host writes
+  (on a low-priority background thread, every time it starts) a
+  human-readable text file at the chosen location containing:
 
-  In practice this gives the user automatic support for **PDF** (via
-  Edge's built-in handler on Windows 10+, or Adobe Acrobat Reader if
-  installed), **EML** (via Windows' built-in MAPI Mail Previewer),
-  and — with `EXT="*"` — Photoshop **PSD**, AutoCAD **DWG/DXF**,
-  Sketchup **SKP**, and anything else that ships a Preview Handler.
+  - **Section 1** — every installed preview handler on the machine,
+    sorted by friendly name, with its CLSID alongside (the master
+    pick-list).  Source: `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`.
+  - **Section 2** — the current per-extension assignment for every
+    file type that has a registered handler (walked from `HKCR\.*`),
+    preformatted as commented-out INI lines
+    (`;.pdf={CLSID} ; Friendly name`) sorted by extension and ready
+    to copy into the `[PreviewHandlers]` section of
+    `TCOfficeView.ini` — uncomment a row, swap the CLSID for one of
+    the alternatives from section 1 above.
+
+  Written atomically via a `.tmp` file + `MoveFileExW`, so the
+  report is never observed half-written.  Off by default — the
+  registry walk is cheap but it's still wasted work on every Lister
+  session when the user isn't actively configuring overrides.  Turn
+  it on while setting up overrides, then comment the line out again.
+  Failure (path unwritable, destination locked by an editor, …) is
+  logged and silently skipped — the report is a convenience, not a
+  requirement for the plugin to function.
+
+- **Per-extension deny in `[PreviewHandlers]`** — write `.ext=` (empty
+  value) to skip an extension entirely.  TCOfficeView then behaves
+  as if no preview handler existed for that file type: the plugin
+  DLL returns `nullptr` from `ListLoadW` / `LISTPLUGIN_ERROR` from
+  `ListLoadNextW`, Total Commander routes the file to the next
+  configured Lister plugin or its built-in viewer, and the host
+  process is never even spawned.  Useful when another Lister plugin
+  does a better job for a specific file type (e.g. a dedicated PDF
+  previewer) and the user wants to keep TCOfficeView for everything
+  else.
+
+  The plugin DLL re-reads the `[PreviewHandlers]` section from the
+  INI on every `ListLoadW` / `ListLoadNextW` call, so deny-list edits
+  take effect immediately without restarting Total Commander.  The
+  host re-reads the section on every spawn and honours the deny list
+  inside `FindPreviewHandlerClsid` as a defence-in-depth backstop in
+  case the DLL ever forwards a file for a denied extension.
 
 ### Changed
 
-- README's "Supported Formats" section is now an indicative list of
+- README's “Supported Formats” section is now an indicative list of
   common handlers rather than the authoritative whitelist (which is
-  whatever the user's machine has registered).  The "When MS Office
-  Is Not Installed" section was renamed and rewritten to reflect the
+  whatever the user's machine has registered).  The “When MS Office
+  Is Not Installed” section was renamed and rewritten to reflect the
   new behaviour: silent decline + TC fall-through for files with no
   handler, and the fallback panel reserved for cases where a handler
   IS registered but fails at run time.
@@ -131,7 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detect string and stores the returned value in `wincmd.ini`,
   overriding whatever `defaultextension=` in `pluginst.inf` set
   initially.  The stale hard-coded list was the real reason new
-  file types (PDF, EML, …) were not picked up automatically on
+  file types (PDF, HTML, …) were not picked up automatically on
   fresh installs — they simply weren't in the string TC saw.  With
   the new value, fresh installs route every file through the plugin
   DLL's `HasPreviewHandlerForExt` registry probe, exactly the way
@@ -170,7 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Commander does not overwrite an already-stored detect string when
   a plugin's DLL is replaced — even if `ListGetDetectString` would
   return something different — so existing installs keep the old
-  Office-only detect string and never get asked about PDF, EML, or
+  Office-only detect string and never get asked about PDF, HTML, or
   the other newly-supported file types.
 
   Two ways to refresh it:
