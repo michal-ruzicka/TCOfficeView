@@ -1305,7 +1305,23 @@ static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             else if (wp == kModeButtonKeepTopTimerId)
             {
-                UpdateModeButtonSta();   // periodic — no KillTimer
+                // Periodic Z-order keep-alive — but only do real work when
+                // some sibling has actually moved above the mode button.
+                // Calling SetWindowPos(HWND_TOP) unconditionally every
+                // 100 ms generates cross-process WM_WINDOWPOSCHANGED
+                // messages to embedded Office windows, which routes
+                // through the system input thread and makes Total
+                // Commander's own modal dialogs (file-overwrite confirm,
+                // copy/delete progress, …) feel sluggish while full mode
+                // is active.  GetWindow(GW_HWNDPREV) == NULL means we are
+                // already at the top — the steady-state case, so the tick
+                // is essentially free.
+                if (g_state.hwndModeButton &&
+                    IsWindowVisible(g_state.hwndModeButton) &&
+                    GetWindow(g_state.hwndModeButton, GW_HWNDPREV) != nullptr)
+                {
+                    UpdateModeButtonSta();
+                }
             }
             break;
     }
@@ -2264,6 +2280,13 @@ static void DetachWordWindowSta()
     style &= ~WS_CHILD;
     style |= WS_OVERLAPPEDWINDOW;
     SetWindowLongPtrW(g_state.hwndWordApp, GWL_STYLE, style);
+    // Force the window manager to re-evaluate the non-client area
+    // (caption, borders) now that the style changed back to overlapped.
+    // Without this the frame can stay in an inconsistent state until
+    // the next paint, causing ghost windows or focus glitches.
+    SetWindowPos(g_state.hwndWordApp, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
     g_state.hwndWordApp = nullptr;
 }
 
@@ -2549,12 +2572,20 @@ static void DestroyCloseGuard()
 // top-level frame. Caller stores the HWND in the appropriate HostState slot.
 static bool EmbedOfficeWindowSta(HWND hwndApp)
 {
+    // Hide the window before any style/parent changes. Cross-process
+    // SetParent on a visible top-level window forces an expensive
+    // synchronous redraw and focus dance across process boundaries.
+    // PowerPoint in particular refuses Visible=False, so its frame is
+    // on-screen from the moment CoCreateInstance returns; hiding it
+    // here makes the reparent cheap and avoids the flash.
+    ShowWindow(hwndApp, SW_HIDE);
+
     LONG_PTR style   = GetWindowLongPtrW(hwndApp, GWL_STYLE);
     LONG_PTR exStyle = GetWindowLongPtrW(hwndApp, GWL_EXSTYLE);
 
     style &= ~(WS_OVERLAPPED | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
                WS_MAXIMIZEBOX | WS_SYSMENU | WS_DLGFRAME | WS_BORDER | WS_POPUP);
-    style |= WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
+    style |= WS_CHILD | WS_CLIPCHILDREN;
     exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE |
                  WS_EX_STATICEDGE   | WS_EX_APPWINDOW   | WS_EX_TOOLWINDOW);
     SetWindowLongPtrW(hwndApp, GWL_STYLE,   style);
@@ -2779,6 +2810,9 @@ static void DetachExcelWindowSta()
     style &= ~WS_CHILD;
     style |= WS_OVERLAPPEDWINDOW;
     SetWindowLongPtrW(g_state.hwndExcelApp, GWL_STYLE, style);
+    SetWindowPos(g_state.hwndExcelApp, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
     g_state.hwndExcelApp = nullptr;
 }
 
@@ -2946,6 +2980,9 @@ static void DetachPptWindowSta()
     style &= ~WS_CHILD;
     style |= WS_OVERLAPPEDWINDOW;
     SetWindowLongPtrW(g_state.hwndPptApp, GWL_STYLE, style);
+    SetWindowPos(g_state.hwndPptApp, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
     g_state.hwndPptApp = nullptr;
 }
 
