@@ -93,6 +93,31 @@ the threading invariants, the `WM_SIZE` coalescing, the cross-process
 `PostMessage`-only worker → STA path that sidesteps
 `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` — live in [CLAUDE.md](CLAUDE.md).
 
+### Universal File-Type Detection
+
+The plugin ships with `detect=EXT="*"` in `pluginst.inf` — Total
+Commander offers TCOfficeView every file the user previews.  Before
+spawning the host process the plugin DLL runs `HasPreviewHandlerForExt`
+(a registry walk mirroring the host's `FindPreviewHandlerClsid` lookup
+chain — direct shellex → default ProgID → `OpenWithProgids` →
+`SystemFileAssociations\<ext>` → `SystemFileAssociations\<PerceivedType>`)
+and returns `nullptr` from `ListLoadW` / `0` from `ListLoadNextW` when
+no handler is registered.  TC then routes the file to the next
+configured Lister plugin or its built-in viewer.
+
+This is why there is no per-format table in `TCOfficeView.cpp`: format
+support is whatever the user's machine has registered.  When adding a
+new test file type, no plugin code change is needed — install the
+relevant application and the next preview picks it up automatically.
+
+The detection function in the plugin DLL is intentionally a near-copy
+of the host's `FindPreviewHandlerClsid` rather than shared via a
+header.  The two callers want different return types (`bool` vs.
+`HRESULT + CLSID`) and the registry chain has been stable enough that
+duplication costs less than a build-system split.  Keep them in
+lock-step when editing — a mismatch would either spawn the host for
+files it can't preview, or hand control back to TC for files we could.
+
 ### Plugin ↔ Host Wire Protocol
 
 Text-based, UTF-16 LE, lines terminated by `\n`, transported over a
@@ -129,6 +154,55 @@ drag.
   menu are not yet wired through to the host. Most preview handlers
   expose their own context menus inside the preview area, so this is
   rarely noticed in practice.
+
+## Diagnostics
+
+User-facing troubleshooting lives in [README.md](README.md#troubleshooting);
+the developer-level notes live here.
+
+**Host process names.** The plugin DLL spawns one of two helper
+executables depending on bitness:
+
+- 64-bit plugin → `TCOfficeViewHost.exe`
+- 32-bit plugin → `TCOfficeViewHost_x86.exe`
+
+Both run as `asInvoker`, host the preview handler in a COM STA, and
+talk to the plugin DLL over a named pipe (`\\.\pipe\TCOfficeView_<pid>_<tick>`).
+Look for these process names in Task Manager, Process Explorer or
+Event Viewer when investigating a hang or a crash.
+
+**Diagnostic log.** Off by default; enable in `TCOfficeView.ini`:
+
+```ini
+[Logging]
+LogPath=%LocalAppData%\TCOfficeView\host.log
+```
+
+The log captures every step of the host's load sequence — registry
+lookup → `CoCreateInstance` → `IInitializeWith*::Initialize` →
+`IPreviewHandler::SetWindow` → `DoPreview` — with the HRESULT of each.
+The first non-success HRESULT pinpoints the stage where things broke.
+
+**Verifying a handler is registered.** The host's lookup chain is:
+
+1. `HKCR\<ext>\shellex\{8895b1c6-b41f-4c1c-a562-0d564250836f}`
+2. `HKCR\<default ProgID of <ext>>\shellex\{8895b1c6-...}`
+3. `HKCR\<each ProgID under <ext>\OpenWithProgids>\shellex\{8895b1c6-...}`
+4. `HKCR\SystemFileAssociations\<ext>\shellex\{8895b1c6-...}`
+5. `HKCR\SystemFileAssociations\<PerceivedType>\shellex\{8895b1c6-...}`
+
+The plugin DLL's `HasPreviewHandlerForExt` walks the same chain.  If
+none of these keys exist for the extension in question, no handler is
+registered and the plugin will (correctly) decline the file.
+
+**Event Viewer.** Faults in the host show up under *Windows Logs →
+Application* as `Application Error` events naming the host EXE (most
+useful for tracking down a misbehaving third-party preview handler).
+
+**Bitness mismatches.** Both bitnesses ship in the auto-install ZIP.
+Some preview handlers register only one bitness — switch to the other
+plugin bitness via TC's plugin configuration if a particular file type
+crashes consistently.
 
 ## Signing Policy
 

@@ -6,20 +6,22 @@
 [![Revolut](https://img.shields.io/badge/Pay-Revolut-191C1F?style=flat&logo=revolut&logoColor=white)](https://revolut.me/ruzicka_michal)
 
 **A [Total Commander](https://www.ghisler.com/) Lister plugin that previews
-Microsoft Office documents — Word, Excel, PowerPoint and more — directly in TC's
-`F3` / Quick View (`Ctrl+Q`) pane.** It hosts the Windows Preview Handlers that an MS Office
-installation already registers, so the previews look exactly like the ones in
-Windows Explorer (`Alt+P`) or Outlook, without any document parsing of its own and without
-a managed runtime.
+Microsoft Office documents (Word, Excel, PowerPoint, Outlook MSG, Visio),
+PDF, and anything else Windows Explorer's preview pane (`Alt+P`) can show,
+directly in TC's `F3` / Quick View (`Ctrl+Q`) pane.**  Whatever Explorer
+previews on your machine, this plugin previews in the Lister pane.
 
-**This plugin is not a replacement for MS Office software; a working MS Office
-installation is required on the target computer** (see section [When MS Office
-is not installed](#when-ms-office-is-not-installed) for more information). The
-plugin then integrates document viewing (handled directly by the MS Office
-applications) into Total Commander for quick and consistent work with MS Office
-files alongside other file types such as images. If MS Office is not installed,
-the plugin shows a small information panel with the file's basic metadata
-instead of an empty preview, so it stays useful in any environment.
+The plugin displays previews exactly the way Windows Explorer or Outlook
+do — it does not parse documents itself, nor does it carry a managed
+runtime.  For files it cannot preview (no handler installed for that
+extension) the plugin steps aside and Total Commander uses your next
+configured Lister plugin or its built-in viewer, so installing it never
+takes anything away from you.
+
+What you need on the target computer depends on the file type: MS Office
+for Word / Excel / PowerPoint / Outlook content; nothing extra for PDF
+on Windows 10+ (Microsoft Edge ships an in-the-box handler); whatever
+application installs the handler for everything else.
 
 ![TCOfficeView shown on Word, Excel and PowerPoint sample files](TCOfficeView.gif)
 
@@ -59,6 +61,71 @@ folder (for example `C:\Tools\TCOfficeView\`) and add `TCOfficeView.wlx`
 (32-bit TC) or `TCOfficeView.wlx64` (64-bit TC) under **Configuration →
 Options → Plugins → Lister plugins → Configure → Add**.
 
+### Upgrading from an Earlier Version
+
+Total Commander does **not** update an already-configured detect string
+when you re-install or upgrade a plugin — it keeps whatever you (or the
+previous installer) set originally.  This is fine for fresh installs
+(the plugin announces `EXT="*"` and TC picks it up automatically) but
+means upgraders from v2.1 or earlier keep their old detect string,
+which lists only the original Office extensions and **never asks the
+plugin about PDF, EML, PSD, DWG and the rest**.
+
+To pick up the new universal behaviour, do one of the following:
+
+#### Option 1: Re-register the plugin (simpler)
+
+1. Open **Configuration → Options → Plugins → Lister plugins → Configure**.
+2. Select **TCOfficeView** and click **Remove**.
+3. Close Total Commander completely and reopen it.
+4. Either re-run the auto-installer (navigate to the release ZIP in
+   TC and press Enter), or add the plugin back manually from the
+   same dialog.
+
+Total Commander will then ask the plugin DLL for its detect string
+on first use and store the new `EXT="*"` value.
+
+#### Option 2: Edit `wincmd.ini` directly
+
+Total Commander's GUI does not expose a way to edit a Lister plugin's
+detect string; it has to be changed in the configuration file.
+
+1. Close Total Commander completely (don't leave it running — TC may
+   overwrite `wincmd.ini` on exit with its in-memory copy).
+2. Open `wincmd.ini` in a plain-text editor.  To find its location,
+   in TC open **Configuration → Options → About**.  Common locations
+   are the TC install directory or `%APPDATA%\GHISLER\wincmd.ini`.
+3. Locate the `[ListerPlugins]` section.  You will see entries like:
+   ```ini
+   [ListerPlugins]
+   0=C:\Program Files\Some other plugin\Foo.wlx
+   0_detect=EXT="JPG"|EXT="PNG"
+   1=C:\Users\<you>\AppData\Roaming\GHISLER\TCOfficeView\TCOfficeView.wlx64
+   1_detect=EXT="DOC"|EXT="DOCX"|…|EXT="MSG"
+   ```
+4. Find the line whose value is the TCOfficeView plugin path (the
+   `<N>=…` line).  Its companion `<N>_detect=…` line on the next row
+   is the detect string for that plugin.
+5. Replace the detect string value with:
+   ```
+   EXT="*"
+   ```
+   …so the line becomes for example `1_detect=EXT="*"`.
+6. Save the file and reopen Total Commander.
+
+If you would rather keep a stricter, finite set of file types instead
+of `EXT="*"`, use this as the `_detect=` value:
+
+```
+EXT="DOC"|EXT="DOCX"|EXT="DOCM"|EXT="RTF"|EXT="XLS"|EXT="XLSX"|EXT="XLSM"|EXT="XLSB"|EXT="PPT"|EXT="PPTX"|EXT="PPTM"|EXT="VSD"|EXT="VSDX"|EXT="MSG"|EXT="EML"|EXT="PDF"
+```
+
+With this list the plugin will be asked only about the common
+formats; with `EXT="*"` it gets asked about every file but silently
+steps aside for any file type Windows has no preview handler for.
+The practical user experience is the same except for less common
+formats (PSD, DWG, SKP, …) which only `EXT="*"` catches.
+
 ### Verifying Releases
 
 Each release ZIP is accompanied by a detached GPG signature file
@@ -81,20 +148,26 @@ selecting a different file in the panel loads it into the same Lister session.
 
 ### Supported Formats
 
-Format support depends on which Windows Preview Handlers are registered
-on the machine. With Microsoft Office installed you typically get:
+**Whatever Windows Explorer's preview pane (`Alt+P`) shows on your
+machine.**  Common formats you can expect on a typical Windows + Office
+installation:
 
-| Application | Extensions |
-|-------------|------------|
-| Word        | DOC, DOCX, DOCM, RTF |
-| Excel       | XLS, XLSX, XLSM, XLSB |
-| PowerPoint  | PPT, PPTX, PPTM |
-| Visio       | VSD, VSDX |
-| Outlook     | MSG |
+| Source | Extensions |
+|--------|------------|
+| Microsoft Word        | DOC, DOCX, DOCM, RTF |
+| Microsoft Excel       | XLS, XLSX, XLSM, XLSB |
+| Microsoft PowerPoint  | PPT, PPTX, PPTM |
+| Microsoft Visio       | VSD, VSDX |
+| Outlook / Windows built-in mail previewer | MSG, EML |
+| Microsoft Edge (built-in) / Adobe Acrobat Reader | PDF |
+| Adobe Photoshop (if installed) | PSD |
+| AutoCAD / DWG TrueView (if installed) | DWG, DXF |
+| Sketchup (if installed) | SKP |
 
-The plugin advertises support for the union of these extensions. If a
-specific handler is missing, the plugin shows the fallback information
-panel for that file instead of failing silently.
+…plus anything else whose installer registers a Windows Preview Handler.
+There is no list of supported file types to maintain — install or
+uninstall an application that ships a handler, and TCOfficeView picks
+that up automatically the next time you use `F3` / `Ctrl+Q`.
 
 > **Quick previews use a simplified rendering pipeline.** Office's
 > built-in preview components — used by Windows Explorer's preview
@@ -258,51 +331,48 @@ Full mode tradeoffs to be aware of:
   ribbon, for example, stays visible in the preview because hiding
   it would hijack your global Office settings.
 
-### When MS Office Is Not Installed
+### When No Preview Handler Is Registered
 
-If the operating system has no Preview Handler for the file's extension — or a
-registered handler fails to load — the plugin renders a read-only text panel in
-place of the preview. It states clearly that no preview handler was found and
-lists what can still be read from the file system:
+If your machine has no Preview Handler at all for a given file type,
+the plugin **silently steps aside** and Total Commander uses your next
+configured Lister plugin or its built-in viewer instead.  Installing
+TCOfficeView therefore never takes anything away from you — file types
+it cannot handle keep working exactly the way they did before.
 
-- file name and full path
-- extension
-- size (human-readable and exact byte count)
-- created, modified and last-accessed timestamps
-
-This way the Lister never shows an empty pane, and a user who installs
-the plugin without Office still sees which file the Lister is on and
-when it was last touched, along with instructions on how to enable real
-previews.
+If a Preview Handler **is** installed but fails to render the file
+(corrupt Office installation, broken handler, password-protected
+document, …), the plugin shows a small information panel with the
+file's basic details — name, full path, extension, size, and
+created / modified / last-accessed timestamps — together with a brief
+note about why the preview did not work.  This way the Lister never
+shows an empty pane when a handler was advertised but couldn't deliver.
 
 ### Troubleshooting
 
-**Plugin does not activate.** Open **Configuration → Options → Plugins →
-Lister plugins → Configure** and verify TCOfficeView is loaded and the
-extension appears in its *Detect string*.
+**The plugin doesn't seem to do anything — I see TC's built-in viewer
+instead.**  Your machine has no Preview Handler for that file type, so
+the plugin steps aside (this is the intended behaviour, not a bug).
+Easy way to confirm: open the file in Windows Explorer and press
+`Alt+P` — if Explorer's preview pane is also empty, no handler is
+installed.  Install (or repair) the application that owns the file
+type and the preview will work in both places.
 
-**Plugin shows the fallback panel instead of a real preview.** No Preview
-Handler is registered for this file extension. The most common cause is
-that MS Office is not installed; for `.msg` / `.vsdx` the relevant
-component may simply not register a handler. Confirm by inspecting the
-registry:
+**I see the information panel instead of the real preview.**  A
+Preview Handler is registered for the file type but it failed to
+render this specific file.  Common causes: corrupted application
+install (try a repair install), a password-protected document, or an
+unusual file variant the handler does not support.
 
-```
-HKCR\.docx\shellex\{8895b1c6-b41f-4c1c-a562-0d564250836f}
-```
+**TC crashes when previewing.**  This should not happen thanks to
+process isolation — the actual preview runs in a separate helper
+process.  If it does happen, the most likely cause is a 32-/64-bit
+mismatch (for example a 64-bit Office where only a 32-bit Preview
+Handler is registered).  Switch to the other bitness of the plugin.
 
-If that key is missing, install (or repair) Office.
-
-**Plugin activates but the pane stays completely blank.** The handler
-was created but rendered nothing. Enable diagnostic logging via the INI
-to see where the load sequence stopped, and check Event Viewer for
-crashes of `TCOfficeViewHost.exe`.
-
-**TC crashes.** Should not happen thanks to process isolation. If it
-does, check Event Viewer for crashes of `TCOfficeViewHost.exe`. The most
-common cause is a 64/32-bit mismatch — for example a 64-bit Office where
-only the 32-bit Preview Handler is registered. Try the other bitness of
-the plugin.
+**Need deeper diagnostics?**  Diagnostic logging can be turned on in
+`TCOfficeView.ini` (see [Logging](#logging) above), and developer-level
+troubleshooting notes — Event Viewer entries, registry keys to check,
+the helper process name to look for — live in [CONTRIBUTING.md](CONTRIBUTING.md#diagnostics).
 
 ## Contributing
 
