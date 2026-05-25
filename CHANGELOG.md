@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.2.1] – 2026-05-26
+
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1.0 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
+
+### Added
+
+- **Mark-of-the-Web detection and one-click unblock in the fallback panel.**
+  When the preview handler refuses to render a file, the fallback panel
+  now reads the file's `Zone.Identifier` alternate data stream and, if
+  the file is marked as having come from the internet (`ZoneId>=3`,
+  i.e. Internet or Restricted zone), replaces the generic "handler
+  failed" text with a tailored explanation: the security zone, the
+  originating URL if present, and a plain-language description of what
+  Office's Protected View does and why.  An **Unblock this file and
+  retry the preview** button is shown at the bottom of the pane; one
+  click strips the `Zone.Identifier` ADS (equivalent to PowerShell's
+  `Unblock-File` or right-click → Properties → Unblock) and re-runs
+  the LOAD in the same mode the user was in, so the document opens
+  without leaving the Lister pane.  The button is only shown for
+  MOTW-blocked files; for all other failure causes the fallback panel
+  is unchanged.
+
+### Fixed
+
+- **Cross-process window reparenting in Full mode no longer causes
+  Total Commander UI stutter.**  Office application windows (Word,
+  Excel, PowerPoint) are now hidden with `ShowWindow(SW_HIDE)` before
+  `SetParent` strips their top-level frame and reparents them into the
+  Lister pane.  Previously the reparent happened while the window was
+  still visible — PowerPoint in particular cannot be started invisibly
+  (`Application.Visible = False` is rejected) — which forced Windows
+  to synchronously reconcile window state across three processes
+  (TC → host → Office) and made Total Commander's own modal dialogs
+  (copy, overwrite confirmation, …) feel sluggish and jerky while a
+  Full-mode preview was active.
+
+  On detach (`UnloadWordFullSta`, `UnloadExcelFullSta`,
+  `UnloadPptFullSta`) each app's window now receives
+  `SetWindowPos(..., SWP_FRAMECHANGED | SWP_HIDEWINDOW)` after its
+  style is restored to `WS_OVERLAPPEDWINDOW`.  Without this the window
+  manager could leave the frame in an inconsistent state (a top-level
+  window without caption or borders) until the next paint, producing
+  "ghost" windows that continued to interfere with focus and Z-order.
+
 ## [v2.2.0] – 2026-05-25
 
 **Universal Preview Handler support** is tha main enhancement of this 
@@ -13,7 +61,7 @@ is now supported by TCOfficeView Total Commander plugin.
 
 > **Upgrading from an earlier version?**  Total Commander keeps an
 > already-configured detect string when a plugin is replaced, so
-> users coming from v2.1 or earlier won't automatically pick up
+> users coming from v2.1.0 or earlier won't automatically pick up
 > the new universal file-type support — see
 > [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
 
@@ -547,6 +595,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[v2.2.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...v2.0.0
