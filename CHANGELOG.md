@@ -5,9 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.2.0] – 2026-05-25
 
-**Universal Preview Handler support** is tha main enhancement of this release.
+**Universal Preview Handler support** is tha main enhancement of this 
+release — **PDF, HTML, ... Anything that Explorer's Alt+P pane can show** 
+is now supported by TCOfficeView Total Commander plugin.
 
 > **Upgrading from an earlier version?**  Total Commander keeps an
 > already-configured detect string when a plugin is replaced, so
@@ -545,7 +547,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
-[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...HEAD
+[v2.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v1.0.0...v2.0.0
 [v1.0.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v0.3.0...v1.0.0
