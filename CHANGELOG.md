@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1.0 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
+
+### Added
+
+- **Mark-of-the-Web detection and one-click unblock in the fallback panel.**
+  When the preview handler refuses to render a file, the fallback panel
+  now reads the file's `Zone.Identifier` alternate data stream and, if
+  the file is marked as having come from the internet (`ZoneId>=3`,
+  i.e. Internet or Restricted zone), replaces the generic "handler
+  failed" text with a tailored explanation: the security zone, the
+  originating URL if present, and a plain-language description of what
+  Office's Protected View does and why.  An **Unblock this file and
+  retry the preview** button is shown at the bottom of the pane; one
+  click strips the `Zone.Identifier` ADS (equivalent to PowerShell's
+  `Unblock-File` or right-click → Properties → Unblock) and re-runs
+  the LOAD in the same mode the user was in, so the document opens
+  without leaving the Lister pane.  The button is only shown for
+  MOTW-blocked files; for all other failure causes the fallback panel
+  is unchanged.
+
 ## [v2.2.0] – 2026-05-25
 
 **Universal Preview Handler support** is tha main enhancement of this 
@@ -13,7 +39,7 @@ is now supported by TCOfficeView Total Commander plugin.
 
 > **Upgrading from an earlier version?**  Total Commander keeps an
 > already-configured detect string when a plugin is replaced, so
-> users coming from v2.1 or earlier won't automatically pick up
+> users coming from v2.1.0 or earlier won't automatically pick up
 > the new universal file-type support — see
 > [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
 

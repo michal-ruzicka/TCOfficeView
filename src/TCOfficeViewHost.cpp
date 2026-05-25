@@ -596,6 +596,8 @@ struct HostState
     HWND                hwndSta         = nullptr;        // message-only window for cross-thread dispatch
     HWND                hwndFallback    = nullptr;        // read-only EDIT shown when no preview handler is usable
     HFONT               hFallbackFont   = nullptr;        // font owned by us, freed when hwndFallback is hidden
+    HWND                hwndUnblockButton = nullptr;      // "Unblock & retry" button shown when the file has MOTW
+    HFONT               hUnblockButtonFont = nullptr;     // font for the unblock button
     HANDLE              hPipe           = INVALID_HANDLE_VALUE;
     IUnknown*           pHandlerUnk     = nullptr;        // raw COM object
     IPreviewHandler*    pHandler        = nullptr;        // queried IPreviewHandler view
@@ -688,6 +690,7 @@ static constexpr UINT WM_HOST_LOAD   = WM_USER + 1;     // lParam = wchar_t* (he
 static constexpr UINT WM_HOST_RESIZE = WM_USER + 2;     // wParam = MAKELONG(w, h)
 static constexpr UINT WM_HOST_CLOSE       = WM_USER + 3;
 static constexpr UINT WM_HOST_SWITCH_MODE = WM_USER + 4;     // user clicked the mode-switch button
+static constexpr UINT WM_HOST_UNBLOCK_AND_RELOAD = WM_USER + 5;  // user clicked the MOTW Unblock button
 
 // Control ID for the mode-switch BUTTON child window of hwndRender —
 // referenced from RenderWndProc's WM_COMMAND handler.
@@ -702,6 +705,12 @@ static constexpr UINT_PTR kModeButtonZTimerId     = 1002;
 // scrolling — without SWP_NOZORDER, which moves them above the button
 // without generating WM_SIZE on hwndRender.
 static constexpr UINT_PTR kModeButtonKeepTopTimerId = 1003;
+
+// Mark-of-the-Web fallback panel: optional "Unblock & retry" button shown
+// alongside the read-only EDIT when the file the handler refused to
+// render is marked as having been downloaded from the internet.  Click
+// deletes the file's Zone.Identifier alternate data stream and reloads.
+static constexpr UINT_PTR kUnblockButtonId          = 1004;
 
 // ---------------------------------------------------------------------------
 // Registry lookup
@@ -1191,18 +1200,93 @@ static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg)
     {
         case WM_ERASEBKGND:
+        {
+            // When the fallback panel is visible we must paint the background
+            // ourselves — the EDIT does not cover the full client area (there
+            // is a gap reserved for the Unblock button) and returning 1 here
+            // would leave that gap unpainted (black).
+            if (g_state.hwndFallback && IsWindowVisible(g_state.hwndFallback))
+            {
+                RECT rc;
+                GetClientRect(hWnd, &rc);
+                FillRect(reinterpret_cast<HDC>(wp), &rc,
+                         reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+                return 1;
+            }
             return 1;                          // preview handler paints
+        }
 
         case WM_COMMAND:
-            // Click on the mode-switch overlay button. Bounce it to the STA
-            // window so the actual mode flip runs on the COM apartment
-            // (LoadXxxFullSta calls IDispatch::Invoke on Word/Excel/PowerPoint).
-            if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == kModeButtonId)
+            // Click on one of our overlay buttons.  Bounce it to the STA
+            // window so the action (which may involve COM, file I/O, …)
+            // runs on the apartment that owns those resources.
+            if (HIWORD(wp) == BN_CLICKED)
             {
-                PostMessageW(g_state.hwndSta, WM_HOST_SWITCH_MODE, 0, 0);
-                return 0;
+                if (LOWORD(wp) == kModeButtonId)
+                {
+                    PostMessageW(g_state.hwndSta, WM_HOST_SWITCH_MODE, 0, 0);
+                    return 0;
+                }
+                if (LOWORD(wp) == kUnblockButtonId)
+                {
+                    PostMessageW(g_state.hwndSta, WM_HOST_UNBLOCK_AND_RELOAD, 0, 0);
+                    return 0;
+                }
             }
             break;
+
+        case WM_DRAWITEM:
+        {
+            // Custom paint for the BS_OWNERDRAW unblock button — themed
+            // push buttons can't be coloured via WM_CTLCOLORBTN, and the
+            // default grey makes the action easy to miss inside the
+            // already-grey fallback panel.  Dark red signals "this is the
+            // thing to click" without resorting to system warning icons.
+            DRAWITEMSTRUCT* di = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+            if (di && di->CtlType == ODT_BUTTON &&
+                di->CtlID == kUnblockButtonId)
+            {
+                const bool pressed = (di->itemState & ODS_SELECTED) != 0;
+                const bool focused = (di->itemState & ODS_FOCUS)    != 0;
+
+                // Slightly darker fill while pressed for tactile feedback.
+                COLORREF bgColor     = pressed ? RGB(0x70, 0x10, 0x10)
+                                               : RGB(0xA0, 0x20, 0x20);
+                COLORREF borderColor = RGB(0x50, 0x08, 0x08);
+                COLORREF textColor   = RGB(0xFF, 0xFF, 0xFF);
+
+                HBRUSH hBg = CreateSolidBrush(bgColor);
+                FillRect(di->hDC, &di->rcItem, hBg);
+                DeleteObject(hBg);
+
+                HBRUSH hBorder = CreateSolidBrush(borderColor);
+                FrameRect(di->hDC, &di->rcItem, hBorder);
+                DeleteObject(hBorder);
+
+                HFONT hFont = reinterpret_cast<HFONT>(
+                    SendMessageW(di->hwndItem, WM_GETFONT, 0, 0));
+                HGDIOBJ hOldFont = hFont ? SelectObject(di->hDC, hFont)
+                                         : nullptr;
+                SetBkMode(di->hDC, TRANSPARENT);
+                SetTextColor(di->hDC, textColor);
+
+                wchar_t label[256] = {};
+                GetWindowTextW(di->hwndItem, label, ARRAYSIZE(label));
+                DrawTextW(di->hDC, label, -1, &di->rcItem,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                if (hOldFont) SelectObject(di->hDC, hOldFont);
+
+                if (focused)
+                {
+                    RECT rcFocus = di->rcItem;
+                    InflateRect(&rcFocus, -3, -3);
+                    DrawFocusRect(di->hDC, &rcFocus);
+                }
+                return TRUE;
+            }
+            break;
+        }
 
         case WM_SIZE:
             // A preview handler or embedded Office app may asynchronously
@@ -1531,11 +1615,192 @@ static std::wstring FormatFileTime(const FILETIME& ft)
     return buf;
 }
 
+// ---------------------------------------------------------------------------
+// Mark of the Web (MOTW) detection and removal.
+//
+// Files downloaded from the internet carry an alternate data stream named
+// "Zone.Identifier" with an INI-shaped body identifying the security zone:
+//
+//   [ZoneTransfer]
+//   ZoneId=3
+//   ReferrerUrl=https://…
+//   HostUrl=https://…
+//
+// ZoneId values per Microsoft Internet zones:
+//   0 = Local Computer
+//   1 = Local Intranet
+//   2 = Trusted Sites
+//   3 = Internet
+//   4 = Restricted Sites
+//
+// Microsoft Office's Protected View blocks rendering of files in zone 3 or
+// higher until the user explicitly approves them.  When that happens
+// IPreviewHandler::DoPreview returns E_FAIL and our fallback panel takes
+// over — we then read the Zone.Identifier ADS to tell the user precisely
+// why the preview failed.
+//
+// Deleting the ADS removes the mark (no admin rights required) and is the
+// programmatic equivalent of clicking "Enable Editing" in Office's yellow
+// security banner.  Irreversible from our side — once unblocked, Windows
+// treats the file as locally created and Office trusts it from then on.
+// ---------------------------------------------------------------------------
+
+struct MotwInfo
+{
+    int          zoneId = -1;     // -1 = no MOTW present
+    std::wstring referrerUrl;
+    std::wstring hostUrl;
+};
+
+// Convert a narrow string slice to wide assuming UTF-8.  Used for the
+// URLs read out of the Zone.Identifier ADS.
+static std::wstring NarrowToWide(const char* s, size_t n)
+{
+    if (n == 0) return L"";
+    int needed = MultiByteToWideChar(CP_UTF8, 0, s, static_cast<int>(n),
+                                     nullptr, 0);
+    if (needed <= 0) return L"";
+    std::wstring w(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s, static_cast<int>(n),
+                        w.data(), needed);
+    return w;
+}
+
+static MotwInfo ReadFileZoneInfo(LPCWSTR path)
+{
+    MotwInfo info;
+
+    const std::wstring adsPath = std::wstring(path) + L":Zone.Identifier";
+    HANDLE h = CreateFileW(adsPath.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return info;       // no MOTW
+
+    char buf[4096] = {};
+    DWORD bytesRead = 0;
+    BOOL ok = ReadFile(h, buf, sizeof(buf) - 1, &bytesRead, nullptr);
+    CloseHandle(h);
+    if (!ok || bytesRead == 0) return info;
+    buf[bytesRead] = '\0';
+
+    // Pulls "<key>=<value>" out of the ADS body, value bounded by EOL.
+    auto extract = [&](const char* key) -> std::wstring {
+        const char* p = strstr(buf, key);
+        if (!p) return L"";
+        p += strlen(key);
+        const char* end = p;
+        while (*end && *end != '\r' && *end != '\n') ++end;
+        // Trim ASCII whitespace.
+        while (p < end && (*p == ' ' || *p == '\t')) ++p;
+        while (end > p && (end[-1] == ' ' || end[-1] == '\t')) --end;
+        return NarrowToWide(p, static_cast<size_t>(end - p));
+    };
+
+    std::wstring zoneStr = extract("ZoneId=");
+    if (!zoneStr.empty()) info.zoneId = _wtoi(zoneStr.c_str());
+    info.referrerUrl = extract("ReferrerUrl=");
+    info.hostUrl     = extract("HostUrl=");
+    return info;
+}
+
+// Human-readable name for a Windows Internet Security zone.
+static LPCWSTR ZoneIdName(int zoneId)
+{
+    switch (zoneId)
+    {
+        case 0: return L"Local Computer";
+        case 1: return L"Local Intranet";
+        case 2: return L"Trusted Sites";
+        case 3: return L"Internet";
+        case 4: return L"Restricted / Untrusted Sites";
+        default: return L"(unknown zone)";
+    }
+}
+
+// Strip the Zone.Identifier ADS from a file.  Equivalent to PowerShell
+// `Unblock-File` or right-click → Properties → Unblock.  Returns true
+// on success.  No-op (but returns true) if the ADS is absent.
+static bool UnblockFileSta(LPCWSTR path)
+{
+    const std::wstring adsPath = std::wstring(path) + L":Zone.Identifier";
+    if (DeleteFileW(adsPath.c_str())) return true;
+    DWORD err = GetLastError();
+    // ERROR_FILE_NOT_FOUND means there was nothing to remove — that's
+    // still "success" from the caller's point of view.
+    return err == ERROR_FILE_NOT_FOUND;
+}
+
 static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
 {
     std::wstring text;
 
-    if (hr == REGDB_E_CLASSNOTREG)
+    // Mark of the Web is by far the most common reason an otherwise-
+    // healthy Office handler refuses to render — check first so the
+    // user gets a precise diagnosis instead of a generic "handler
+    // failed" message.
+    const MotwInfo motw = ReadFileZoneInfo(path);
+    const bool isMotwBlocked = (motw.zoneId >= 3);   // Internet / Untrusted
+
+    if (isMotwBlocked)
+    {
+        wchar_t lead[2048] = {};
+        _snwprintf_s(lead, _TRUNCATE,
+            L"This file is blocked because Windows marked it as coming\r\n"
+            L"from outside your computer.\r\n"
+            L"\r\n"
+            L"Microsoft Office and several other applications protect you\r\n"
+            L"from documents downloaded from the internet (or copied from a\r\n"
+            L"network share or an email attachment) by refusing to render\r\n"
+            L"their content until you explicitly approve them.  This is a\r\n"
+            L"defence against malicious macros, exploits and social-\r\n"
+            L"engineering files — please consider whether you trust this\r\n"
+            L"file's origin before lifting the block below.\r\n"
+            L"\r\n"
+            L"What the preview handler reported: HRESULT 0x%08lX.\r\n"
+            L"\r\n"
+            L"Source of the file\r\n"
+            L"  Zone:        %s (ZoneId=%d)\r\n",
+            static_cast<long>(hr),
+            ZoneIdName(motw.zoneId), motw.zoneId);
+        text += lead;
+
+        if (!motw.hostUrl.empty())
+        {
+            text += L"  Came from:   ";
+            text += motw.hostUrl;
+            text += L"\r\n";
+        }
+        if (!motw.referrerUrl.empty() && motw.referrerUrl != motw.hostUrl)
+        {
+            text += L"  Referrer:    ";
+            text += motw.referrerUrl;
+            text += L"\r\n";
+        }
+
+        text += L"\r\n";
+        text += L"What clicking the \"Unblock\" button below will do\r\n";
+        text += L"\r\n";
+        text += L"  - Remove the \"downloaded from another computer\" mark\r\n";
+        text += L"    from this file by deleting its hidden\r\n";
+        text += L"    Zone.Identifier alternate data stream.\r\n";
+        text += L"  - Retry the preview.  If Office's Protected View was\r\n";
+        text += L"    the only reason rendering failed, the document will\r\n";
+        text += L"    now show normally.\r\n";
+        text += L"  - Affect only this specific file.  Other downloaded\r\n";
+        text += L"    files remain blocked.\r\n";
+        text += L"  - Be the equivalent of opening the document in Word /\r\n";
+        text += L"    Excel / PowerPoint and clicking \"Enable Editing\" in\r\n";
+        text += L"    the yellow security bar at the top — except you do\r\n";
+        text += L"    not have to leave the Lister pane.\r\n";
+        text += L"  - Be permanent: once unblocked, Windows treats the\r\n";
+        text += L"    file as locally created and Office will trust it\r\n";
+        text += L"    from now on.\r\n";
+        text += L"\r\n";
+        text += L"If you would rather inspect the file with another tool\r\n";
+        text += L"first, close this preview without clicking Unblock.\r\n";
+    }
+    else if (hr == REGDB_E_CLASSNOTREG)
     {
         text += L"No MS Office preview handler is registered for this file.\r\n";
         text += L"\r\n";
@@ -1629,6 +1894,39 @@ static void HideFallbackSta()
         DeleteObject(g_state.hFallbackFont);
         g_state.hFallbackFont = nullptr;
     }
+    if (g_state.hwndUnblockButton)
+    {
+        DestroyWindow(g_state.hwndUnblockButton);
+        g_state.hwndUnblockButton = nullptr;
+    }
+    if (g_state.hUnblockButtonFont)
+    {
+        DeleteObject(g_state.hUnblockButtonFont);
+        g_state.hUnblockButtonFont = nullptr;
+    }
+}
+
+// Position the MOTW unblock button at the bottom-centre of the render pane.
+// No-op if the button does not currently exist.  Centralised because both
+// ShowFallbackSta (initial placement) and ResizeHandlerSta (on every WM_SIZE)
+// need the exact same geometry — without the resize path the button stays at
+// its original coordinates and can end up off-screen when the user shrinks
+// the Lister window.
+static void LayoutUnblockButtonSta(int paneW, int paneH)
+{
+    if (!g_state.hwndUnblockButton) return;
+    UINT dpi = GetDpiForWindow(g_state.hwndRender);
+    if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
+    const int btnHeight  = ScaleForDpi(36, dpi);
+    const int btnPadding = ScaleForDpi(8, dpi);
+    const int btnWidth   = ScaleForDpi(320, dpi);
+    const int btnX = (paneW - btnWidth) / 2;
+    const int btnY = paneH - btnHeight - btnPadding;
+    // HWND_TOP keeps it above any sibling the close guard or a leftover
+    // Office frame may have added to hwndRender's child list.
+    SetWindowPos(g_state.hwndUnblockButton, HWND_TOP,
+                 btnX, btnY, btnWidth, btnHeight,
+                 SWP_NOACTIVATE);
 }
 
 static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
@@ -1639,11 +1937,37 @@ static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
     RECT rc = {};
     GetClientRect(g_state.hwndRender, &rc);
 
+    const int paneW = rc.right - rc.left;
+    const int paneH = rc.bottom - rc.top;
+
+    // Decide whether to reserve space at the bottom for an "Unblock"
+    // button.  Only when the file is actually MOTW-blocked do we want
+    // to offer the action; for plain "no handler" / "handler crashed"
+    // fallbacks the button would have nothing useful to do.
+    const MotwInfo motw = ReadFileZoneInfo(path);
+    const bool showUnblock = (motw.zoneId >= 3);
+
+    UINT dpi = GetDpiForWindow(g_state.hwndRender);
+    if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
+
+    // The EDIT covers the FULL pane regardless of whether we add a
+    // button.  This is intentional: when navigating between files the
+    // previous preview handler often leaves its rendering window
+    // parented under hwndRender (the surrogate process keeps it alive
+    // even after our COM Unload + Release).  A smaller EDIT would let
+    // those leftover windows show through in the side / bottom gaps
+    // around an undersized button.  Making the EDIT full-pane means
+    // its opaque background occludes every leftover sibling cleanly;
+    // the Unblock button is then placed ON TOP, overlaying the EDIT
+    // at the bottom — also opaque, so its area is clean too.  The
+    // last few lines of the fallback text may be hidden behind the
+    // button; the EDIT's vertical scroll bar lets the user reach them
+    // and the important content is in the upper paragraphs anyway.
     HWND hEdit = CreateWindowExW(
         0, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPSIBLINGS |
         ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_LEFT,
-        0, 0, rc.right - rc.left, rc.bottom - rc.top,
+        0, 0, paneW, paneH,
         g_state.hwndRender, nullptr,
         GetModuleHandleW(nullptr), nullptr);
     if (!hEdit)
@@ -1661,6 +1985,66 @@ static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
     SetWindowTextW(hEdit, body.c_str());
 
     g_state.hwndFallback = hEdit;
+
+    // Unblock button (MOTW only).  Posts WM_HOST_UNBLOCK_AND_RELOAD on
+    // click; the STA handler strips the file's Zone.Identifier ADS and
+    // re-runs the LOAD.
+    //
+    // BS_OWNERDRAW so RenderWndProc's WM_DRAWITEM handler can paint it
+    // in an attention-grabbing dark red — the default themed grey blends
+    // into the fallback panel and users miss it.  On owner-draw push
+    // buttons WM_CTLCOLORBTN is NOT sent on themed Windows, so this is
+    // the only reliable way to colorise.
+    if (showUnblock)
+    {
+        wchar_t btnLabel[128] = {};
+        _snwprintf_s(btnLabel, _TRUNCATE,
+                     L"Unblock this file and retry the preview  (%s)",
+                     ZoneIdName(motw.zoneId));
+
+        HWND hBtn = CreateWindowExW(
+            0, L"BUTTON", btnLabel,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
+            0, 0, 0, 0,                              // sized by LayoutUnblockButtonSta
+            g_state.hwndRender,
+            reinterpret_cast<HMENU>(kUnblockButtonId),
+            GetModuleHandleW(nullptr), nullptr);
+        if (hBtn)
+        {
+            int fontHeight = -ScaleForDpi(11, dpi);   // ~11pt at the window's DPI
+            HFONT hFont = CreateFontW(
+                fontHeight, 0, 0, 0,
+                FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            if (hFont)
+                SendMessageW(hBtn, WM_SETFONT,
+                             reinterpret_cast<WPARAM>(hFont), TRUE);
+            g_state.hwndUnblockButton  = hBtn;
+            g_state.hUnblockButtonFont = hFont;
+            LayoutUnblockButtonSta(paneW, paneH);
+            HostLog(L"  ShowFallbackSta: MOTW detected (ZoneId=%d), "
+                    L"Unblock button shown", motw.zoneId);
+        }
+        else
+        {
+            HostLog(L"  ShowFallbackSta: MOTW detected but Button "
+                    L"CreateWindowEx failed err=%lu", GetLastError());
+        }
+    }
+    // Refresh the mode-switch button so it is re-positioned above the
+    // fallback controls (the EDIT was just created and sits at the top
+    // of the Z-order by default).
+    UpdateModeButtonSta();
+
+    // Force a full repaint of the render pane and every child.  Without
+    // this, a previous handler's leftover bitmap can briefly bleed through
+    // before the OS gets around to invalidating the area newly covered by
+    // our EDIT / button.
+    RedrawWindow(g_state.hwndRender, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+
     HostLog(L"  ShowFallbackSta: displayed fallback UI (hr=0x%08lX)",
             static_cast<long>(hr));
     return true;
@@ -2852,6 +3236,56 @@ public:
 // Preview handler lifecycle. STA thread only.
 // ---------------------------------------------------------------------------
 
+// Detach any child window under hwndRender that isn't one of ours.
+//
+// Preview handlers run in the prevhost.exe surrogate and reparent their own
+// rendering window under our hwndRender via cross-process SetParent.  When we
+// release the handler (IPreviewHandler::Unload + Release) the surrogate is
+// SUPPOSED to destroy that window, but in practice — especially for handlers
+// that crashed mid-DoPreview, were swapped out without a clean shutdown, or
+// hold references on a background thread — the window can linger.  A leftover
+// child sits on top of whatever we paint next (mode/unblock buttons, fallback
+// EDIT) and shows the previous file's content through the gaps.
+//
+// We can't destroy a window owned by another process, but we CAN SetParent it
+// elsewhere — Win32 permits cross-process parent changes.  Moving the orphan
+// to HWND_MESSAGE takes it out of hwndRender's visible hierarchy entirely;
+// the surrogate retains ownership and will dispose of it on its own schedule.
+static void PurgeOrphanRenderChildrenSta()
+{
+    if (!g_state.hwndRender) return;
+
+    // Snapshot first, then act — SetParent mutates the sibling chain we'd be
+    // walking with GetWindow(GW_HWNDNEXT).
+    std::vector<HWND> orphans;
+    HWND child = GetWindow(g_state.hwndRender, GW_CHILD);
+    while (child)
+    {
+        if (child != g_state.hwndModeButton    &&
+            child != g_state.hwndUnblockButton &&
+            child != g_state.hwndFallback      &&
+            child != g_state.hwndCloseGuard    &&
+            child != g_state.hwndWordApp       &&
+            child != g_state.hwndExcelApp      &&
+            child != g_state.hwndPptApp)
+        {
+            orphans.push_back(child);
+        }
+        child = GetWindow(child, GW_HWNDNEXT);
+    }
+
+    for (HWND w : orphans)
+    {
+        // SetParent to HWND_MESSAGE detaches w from the visible hierarchy
+        // without destroying it.  Best-effort: failure (e.g. the surrogate
+        // already tore the window down between enumeration and call) is
+        // benign — log and move on.
+        HWND prev = SetParent(w, HWND_MESSAGE);
+        HostLog(L"  PurgeOrphanRenderChildrenSta: detached hwnd=0x%p (was child of 0x%p)",
+                w, prev);
+    }
+}
+
 static void UnloadHandlerSta()
 {
     HideFallbackSta();
@@ -2875,6 +3309,11 @@ static void UnloadHandlerSta()
         g_state.pHandlerUnk->Release();
         g_state.pHandlerUnk = nullptr;
     }
+    // After COM has released its references, sweep up any cross-process
+    // child window the surrogate left behind under hwndRender.  Must run
+    // AFTER the IPreviewHandler release so we don't yank a window that
+    // the handler is still drawing into.
+    PurgeOrphanRenderChildrenSta();
 }
 
 static HRESULT LoadHandlerSta(LPCWSTR path)
@@ -3107,6 +3546,13 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 
     g_state.pHandlerUnk = pUnk;
     g_state.pHandler    = pPH;
+
+    // Force a clean repaint of the render pane and all children so the new
+    // handler's window paints over any leftover area from the previous one
+    // immediately (instead of waiting for the next WM_PAINT cycle).
+    RedrawWindow(g_state.hwndRender, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+
     HostLog(L"  LoadHandlerSta SUCCESS");
     return S_OK;
 }
@@ -3324,6 +3770,36 @@ static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode)
     HRESULT result          = E_FAIL;
     bool    fellThroughFull = false;        // full mode failed → try quick
 
+    // If the file has MOTW and we're about to open it in full mode, skip
+    // directly to fallback. Opening a MOTW-blocked file in the real Office
+    // app would load it in an editable state (not Protected View) because
+    // ReadOnly=True bypasses Protected View. Show the fallback instead.
+    {
+        const MotwInfo motw = ReadFileZoneInfo(path);
+        if (motw.zoneId >= 3 && mode == Mode::Full)
+        {
+            HostLog(L"  MOTW detected (ZoneId=%d), skipping full mode — showing fallback",
+                    motw.zoneId);
+            // Tear down any previously-embedded Office app so the fallback
+            // panel isn't visually hidden behind it.  This is the same
+            // light-weight cleanup that the quick-mode fall-through path
+            // below performs: documents close, but the Office processes
+            // stay alive so the next non-MOTW Full-mode load is fast.
+            if (g_state.hwndWordApp)  { CloseWordDocumentSta();    DetachWordWindowSta(); }
+            if (g_state.hwndExcelApp) { CloseExcelWorkbookSta();   DetachExcelWindowSta(); }
+            if (g_state.hwndPptApp)   { ClosePptPresentationSta(); DetachPptWindowSta(); }
+            // Show the original user-visible path, not the junction alias.
+            ShowFallbackSta(origPath, E_FAIL);
+            // Clean up the previous LOAD's junction (we didn't reach the
+            // function's normal cleanup at the bottom because of the
+            // early return); also retry any older stale junctions.
+            TryRemoveJunctionSta(prevJunctionDir);
+            RetryStaleJunctionsSta();
+            g_state.loadingInProgress = false;
+            return S_OK;
+        }
+    }
+
     if (mode == Mode::Full)
     {
         HRESULT hr = E_FAIL;
@@ -3433,6 +3909,10 @@ static void ResizeHandlerSta(int w, int h)
         SetWindowPos(g_state.hwndFallback, nullptr, 0, 0, w, h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    // The unblock button is positioned relative to the bottom edge; without
+    // this it would stay at its original coordinates and end up off-screen
+    // (or covered) when the user shrinks the Lister window.
+    LayoutUnblockButtonSta(w, h);
     ResizeOfficeFullSta(w, h);
 
     // Keep the close-guard stretched across the full width of the render pane.
@@ -3509,6 +3989,41 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             if (FAILED(hr))
             {
                 HostLog(L"WM_HOST_SWITCH_MODE: LoadFileWithModeSta failed hr=0x%08lX",
+                        static_cast<long>(hr));
+            }
+            return 0;
+        }
+        case WM_HOST_UNBLOCK_AND_RELOAD:
+        {
+            // User clicked the MOTW Unblock button in the fallback panel.
+            // Strip the file's Zone.Identifier alternate data stream and
+            // re-attempt the LOAD with the same mode that was active
+            // when the fallback was shown.
+            if (g_state.currentFile.empty())
+            {
+                HostLog(L"WM_HOST_UNBLOCK_AND_RELOAD: ignored (no current file)");
+                return 0;
+            }
+            std::wstring path = g_state.currentFile;     // local copy; reload overwrites
+            const AppKind app  = g_state.currentFileApp;
+            const Mode    mode = g_state.currentLoadedMode;
+
+            bool ok = UnblockFileSta(path.c_str());
+            HostLog(L"WM_HOST_UNBLOCK_AND_RELOAD: DeleteFile('%s:Zone.Identifier') -> %s",
+                    path.c_str(), ok ? L"OK" : L"FAILED");
+
+            if (!ok)
+            {
+                // ADS removal failed (file read-only, antivirus locked it, …).
+                // Leave the fallback panel as-is so the user can see what's
+                // going on; no further action without their input.
+                return 0;
+            }
+
+            HRESULT hr = LoadFileWithModeSta(path.c_str(), app, mode);
+            if (FAILED(hr))
+            {
+                HostLog(L"WM_HOST_UNBLOCK_AND_RELOAD: reload failed hr=0x%08lX",
                         static_cast<long>(hr));
             }
             return 0;
