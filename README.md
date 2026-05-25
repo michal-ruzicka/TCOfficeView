@@ -61,70 +61,12 @@ folder (for example `C:\Tools\TCOfficeView\`) and add `TCOfficeView.wlx`
 (32-bit TC) or `TCOfficeView.wlx64` (64-bit TC) under **Configuration →
 Options → Plugins → Lister plugins → Configure → Add**.
 
-### Upgrading from an Earlier Version
-
-Total Commander does **not** update an already-configured detect string
-when you re-install or upgrade a plugin — it keeps whatever you (or the
-previous installer) set originally.  This is fine for fresh installs
-(the plugin announces `EXT="*"` and TC picks it up automatically) but
-means upgraders from v2.1 or earlier keep their old detect string,
-which lists only the original Office extensions and **never asks the
-plugin about PDF, EML, PSD, DWG and the rest**.
-
-To pick up the new universal behaviour, do one of the following:
-
-#### Option 1: Re-register the plugin (simpler)
-
-1. Open **Configuration → Options → Plugins → Lister plugins → Configure**.
-2. Select **TCOfficeView** and click **Remove**.
-3. Close Total Commander completely and reopen it.
-4. Either re-run the auto-installer (navigate to the release ZIP in
-   TC and press Enter), or add the plugin back manually from the
-   same dialog.
-
-Total Commander will then ask the plugin DLL for its detect string
-on first use and store the new `EXT="*"` value.
-
-#### Option 2: Edit `wincmd.ini` directly
-
-Total Commander's GUI does not expose a way to edit a Lister plugin's
-detect string; it has to be changed in the configuration file.
-
-1. Close Total Commander completely (don't leave it running — TC may
-   overwrite `wincmd.ini` on exit with its in-memory copy).
-2. Open `wincmd.ini` in a plain-text editor.  To find its location,
-   in TC open **Configuration → Options → About**.  Common locations
-   are the TC install directory or `%APPDATA%\GHISLER\wincmd.ini`.
-3. Locate the `[ListerPlugins]` section.  You will see entries like:
-   ```ini
-   [ListerPlugins]
-   0=C:\Program Files\Some other plugin\Foo.wlx
-   0_detect=EXT="JPG"|EXT="PNG"
-   1=C:\Users\<you>\AppData\Roaming\GHISLER\TCOfficeView\TCOfficeView.wlx64
-   1_detect=EXT="DOC"|EXT="DOCX"|…|EXT="MSG"
-   ```
-4. Find the line whose value is the TCOfficeView plugin path (the
-   `<N>=…` line).  Its companion `<N>_detect=…` line on the next row
-   is the detect string for that plugin.
-5. Replace the detect string value with:
-   ```
-   EXT="*"
-   ```
-   …so the line becomes for example `1_detect=EXT="*"`.
-6. Save the file and reopen Total Commander.
-
-If you would rather keep a stricter, finite set of file types instead
-of `EXT="*"`, use this as the `_detect=` value:
-
-```
-EXT="DOC"|EXT="DOCX"|EXT="DOCM"|EXT="RTF"|EXT="XLS"|EXT="XLSX"|EXT="XLSM"|EXT="XLSB"|EXT="PPT"|EXT="PPTX"|EXT="PPTM"|EXT="VSD"|EXT="VSDX"|EXT="MSG"|EXT="EML"|EXT="PDF"
-```
-
-With this list the plugin will be asked only about the common
-formats; with `EXT="*"` it gets asked about every file but silently
-steps aside for any file type Windows has no preview handler for.
-The practical user experience is the same except for less common
-formats (PSD, DWG, SKP, …) which only `EXT="*"` catches.
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version](#upgrading-from-an-earlier-version)
+> below for how to refresh it.
 
 ### Verifying Releases
 
@@ -346,6 +288,71 @@ file's basic details — name, full path, extension, size, and
 created / modified / last-accessed timestamps — together with a brief
 note about why the preview did not work.  This way the Lister never
 shows an empty pane when a handler was advertised but couldn't deliver.
+
+### Upgrading from an Earlier Version
+
+Total Commander does **not** update an already-configured detect string
+when you re-install or upgrade a plugin — it keeps whatever you (or the
+previous installer) set originally.  This is fine for fresh installs
+(the plugin announces `EXT="*"` and TC picks it up automatically) but
+means upgraders from v2.1 or earlier keep their old detect string,
+which lists only the original Office extensions and **never asks the
+plugin about PDF, EML, PSD, DWG and the rest**.
+
+To pick up the new universal behaviour, do one of the following:
+
+#### Option 1: Re-register the plugin (simpler)
+
+1. Open **Configuration → Options → Plugins → Lister plugins → Configure**.
+2. Select **TCOfficeView** and click **Remove**.
+3. Close Total Commander completely and reopen it.
+4. Either re-run the auto-installer (navigate to the release ZIP in
+   TC and press Enter), or add the plugin back manually from the
+   same dialog.
+
+Total Commander will then ask the plugin DLL for its detect string
+on first use and store the new `EXT="*"` value.
+
+#### Option 2: Edit `wincmd.ini` directly
+
+Total Commander's GUI does not expose a way to edit a Lister plugin's
+detect string; it has to be changed in the configuration file.
+
+1. Close Total Commander completely (don't leave it running — TC may
+   overwrite `wincmd.ini` on exit with its in-memory copy).
+2. Open `wincmd.ini` in a plain-text editor.  To find its location,
+   in TC open **Configuration → Options → About**.  Common locations
+   are the TC install directory or `%APPDATA%\GHISLER\wincmd.ini`.
+3. Locate the `[ListerPlugins]` section.  You will see entries like:
+   ```ini
+   [ListerPlugins]
+   0=C:\Program Files\Some other plugin\Foo.wlx
+   0_detect=EXT="JPG"|EXT="PNG"
+   1=C:\Users\<you>\AppData\Roaming\GHISLER\TCOfficeView\TCOfficeView.wlx64
+   1_detect=EXT="DOC"|EXT="DOCX"|…|EXT="MSG"
+   ```
+4. Find the line whose value is the TCOfficeView plugin path (the
+   `<N>=…` line).  Its companion `<N>_detect=…` line on the next row
+   is the detect string for that plugin.
+5. Replace the detect string value with:
+   ```
+   EXT="*"
+   ```
+   …so the line becomes for example `1_detect=EXT="*"`.
+6. Save the file and reopen Total Commander.
+
+If you would rather keep a stricter, finite set of file types instead
+of `EXT="*"`, use this as the `_detect=` value:
+
+```
+EXT="DOC"|EXT="DOCX"|EXT="DOCM"|EXT="RTF"|EXT="XLS"|EXT="XLSX"|EXT="XLSM"|EXT="XLSB"|EXT="PPT"|EXT="PPTX"|EXT="PPTM"|EXT="VSD"|EXT="VSDX"|EXT="MSG"|EXT="EML"|EXT="PDF"
+```
+
+With this list the plugin will be asked only about the common
+formats; with `EXT="*"` it gets asked about every file but silently
+steps aside for any file type Windows has no preview handler for.
+The practical user experience is the same except for less common
+formats (PSD, DWG, SKP, …) which only `EXT="*"` catches.
 
 ### Troubleshooting
 

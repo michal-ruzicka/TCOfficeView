@@ -105,15 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DLL's `HasPreviewHandlerForExt` registry probe, exactly the way
   the new universal-handler architecture was meant to work.
 
-  **Upgrade note**: Total Commander does NOT overwrite an
-  already-stored detect string when a plugin's DLL is replaced —
-  even if `ListGetDetectString` would return something different.
-  Users coming from v2.1 or earlier therefore keep the old Office-
-  only string in TC config; the README explains how to update it
-  (either remove and re-add the plugin in TC's Lister plugins list,
-  or edit the relevant `<N>_detect=` line under `[ListerPlugins]`
-  in `wincmd.ini` directly — TC's GUI does not expose a way to
-  change the detect string).
+  Existing users coming from v2.1 or earlier need a one-off
+  configuration refresh to pick this up — see *Notes* below.
 - **`ListLoadNextW` no longer leaves a stale preview on screen when
   navigating (`n` / `p` keys in the Lister) to a file the plugin
   can't handle.**  The previous code returned the wrong constant on
@@ -137,6 +130,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now the single source of truth — the plugin DLL itself decides
   which files TC should ask it about, and the answer is "all of
   them; my registry probe will decline the ones I can't render".
+
+### Notes
+
+- **Upgrading from v2.1.0 or earlier requires a one-off configuration
+  refresh to enable the new universal file-type support.**  Total
+  Commander does not overwrite an already-stored detect string when
+  a plugin's DLL is replaced — even if `ListGetDetectString` would
+  return something different — so existing installs keep the old
+  Office-only detect string and never get asked about PDF, EML, or
+  the other newly-supported file types.
+
+  Two ways to refresh it:
+
+  1. **Remove and re-add the plugin** in *Total Commander →
+     Configuration → Options → Plugins → Lister plugins →
+     Configure*.  On the next file preview, TC will ask the new
+     plugin DLL for its detect string and store `EXT="*"`.
+  2. **Edit `wincmd.ini` directly** — Total Commander's GUI does
+     not expose a way to change a Lister plugin's detect string at
+     all, so this is the only way without going through Remove /
+     Add.  Close TC, edit the `<N>_detect=` line under
+     `[ListerPlugins]` (where `<N>` is the slot whose
+     `<N>=` line is the TCOfficeView DLL path) to `EXT="*"`, save,
+     and reopen TC.
+
+  Both procedures are spelled out step-by-step in *README.md →
+  Upgrading from an Earlier Version*.
 
 ## [v2.1.0] – 2026-05-23
 
