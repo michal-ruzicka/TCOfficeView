@@ -9,30 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Auto-generated discovery report at
-  `%APPDATA%\GHISLER\TCOfficeView.available-handlers.txt`.**  Each
-  time the host process starts, a low-priority background thread
-  enumerates `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`
-  for every installed preview handler and walks `HKCR\.*` for every
-  extension that currently resolves to one, and writes a human-
-  readable, UTF-8 text file with:
+- **Optional discovery report — set `[PreviewHandlers] ReportPath=<path>`
+  in the INI to enable.**  When the option is set, the host writes
+  (on a low-priority background thread, every time it starts) a
+  human-readable text file at the chosen location containing:
 
   - **Section 1** — every installed preview handler on the machine,
     sorted by friendly name, with its CLSID alongside (the master
-    pick-list).
+    pick-list).  Source: `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers`.
   - **Section 2** — the current per-extension assignment for every
-    file type that has a registered handler, preformatted as
-    commented-out INI lines (`;.pdf={CLSID} ; Friendly name`)
-    sorted by extension and ready to copy into the
-    `[PreviewHandlers]` section of `TCOfficeView.ini` — uncomment a
-    row, swap the CLSID for one of the alternatives from section 1
-    above.
+    file type that has a registered handler (walked from `HKCR\.*`),
+    preformatted as commented-out INI lines
+    (`;.pdf={CLSID} ; Friendly name`) sorted by extension and ready
+    to copy into the `[PreviewHandlers]` section of
+    `TCOfficeView.ini` — uncomment a row, swap the CLSID for one of
+    the alternatives from section 1 above.
 
   Written atomically via a `.tmp` file + `MoveFileExW`, so the
-  report is never observed half-written.  Failure (no `%APPDATA%`,
-  destination locked by an editor, …) is logged and silently
-  skipped — the report is a convenience, not a requirement for the
-  plugin to function.
+  report is never observed half-written.  Off by default — the
+  registry walk is cheap but it's still wasted work on every Lister
+  session when the user isn't actively configuring overrides.  Turn
+  it on while setting up overrides, then comment the line out again.
+  Failure (path unwritable, destination locked by an editor, …) is
+  logged and silently skipped — the report is a convenience, not a
+  requirement for the plugin to function.
 
 - **`[PreviewHandlers]` INI section for per-extension CLSID overrides.**
   When several preview handlers are installed for the same file type
@@ -92,6 +92,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IS registered but fails at run time.
 
 ### Fixed
+
+- **`[PreviewHandlers]` parser rejected entries that ended with an
+  inline `;comment`.**  The sample INI documented the format
+  `.pdf={CLSID} ; Friendly name`, exactly the same shape the
+  discovery report produces for copy-paste — but the parser passed
+  the value, comment and all, straight to `CLSIDFromString`, which
+  is strict about trailing characters and silently dropped the
+  entry.  The override therefore had no effect even though the user
+  had written it correctly per the docs.  Values are now stripped
+  of any inline `;…` tail and surrounding whitespace before being
+  parsed.  Each successfully-loaded override is also logged
+  (`PreviewHandlers override: .pdf -> {…}`), and each rejected
+  entry is logged as `REJECTED (bad CLSID)` so typos are easier
+  to spot.
 
 - **`ListGetDetectString` now returns `EXT="*"`** instead of a
   hard-coded list of Office extensions.  Total Commander calls this

@@ -113,6 +113,19 @@ static Mode         g_modePowerPoint = Mode::QuickSwitchable;
 // one regardless of which one Windows considers the system default.
 static std::map<std::wstring, std::wstring> g_extensionOverrides;
 
+// Optional opt-in discovery aid (see [PreviewHandlers] ReportPath in
+// the INI).  When non-empty, the host writes a human-readable list of
+// every installed preview handler and every per-extension assignment
+// to this path on each start-up.  Off by default — most users only
+// ever need it once, when first setting up an override.
+static std::wstring g_handlersReportPath;
+
+// Forward declaration — HostLog's real definition lives further down,
+// inside the #if HOST_LOG_ENABLED block.  Declared here so the
+// LoadConfigFrom parser below can announce loaded / rejected
+// [PreviewHandlers] overrides.
+static void HostLog(const wchar_t* fmt, ...);
+
 static std::wstring ExpandEnv(LPCWSTR s)
 {
     if (!s || !*s) return L"";
@@ -178,6 +191,15 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     g_modeExcel      = readMode(L"Excel",      Mode::QuickSwitchable);
     g_modePowerPoint = readMode(L"PowerPoint", Mode::QuickSwitchable);
 
+    // [PreviewHandlers] ReportPath — optional opt-in discovery aid.
+    // When set to a non-empty file path the host writes a snapshot of
+    // every installed preview handler and every per-extension
+    // assignment to that file on each launch.  Off by default; only
+    // useful when first configuring an override.
+    GetPrivateProfileStringW(L"PreviewHandlers", L"ReportPath", L"",
+                             buf, ARRAYSIZE(buf), iniPath.c_str());
+    g_handlersReportPath = ExpandEnv(buf);
+
     // [PreviewHandlers] — per-extension CLSID overrides.
     //
     // Format inside the INI:
@@ -186,11 +208,27 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     //   .msg={70AE7BC8-D953-409F-9DC2-2BE5F77AF6AB}
     //
     // Keys are extensions (with or without leading dot, case-insensitive).
-    // Values are full GUIDs in braces.  Bad or unparseable CLSIDs are
-    // ignored at load time (logged at the next opportunity).
+    // Values are full GUIDs in braces.  Trailing inline ";comment" and
+    // surrounding whitespace are stripped, so this also works:
+    //   .pdf = {1531D583-8375-4D3F-B5FB-D23BBD169F22}   ; Edge PDF
     //
-    // We read the entire section with GetPrivateProfileSectionW and
-    // walk the returned double-null-terminated key=value pairs ourselves.
+    // Each successfully-loaded entry is logged (if logging is enabled).
+    // Rejected entries (bad CLSID format, empty key, …) are logged too
+    // so the user can spot typos.
+    //
+    // We read the entire section with GetPrivateProfileSectionW and walk
+    // the returned double-null-terminated key=value pairs ourselves so
+    // we can also pick up `ReportPath=…` (above) from the same section
+    // without it ending up in the override map.
+    auto trim = [](std::wstring& s) {
+        while (!s.empty() && (s.back() == L' ' || s.back() == L'\t'))
+            s.pop_back();
+        size_t lead = 0;
+        while (lead < s.size() && (s[lead] == L' ' || s[lead] == L'\t'))
+            ++lead;
+        if (lead) s.erase(0, lead);
+    };
+
     g_extensionOverrides.clear();
     {
         constexpr DWORD kSectionBufWChars = 8192;
@@ -208,25 +246,42 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
                 std::wstring key(p, eq - p);
                 std::wstring val(eq + 1);
 
-                // Normalise key: trim, lowercase, ensure leading dot.
-                while (!key.empty() && (key.back() == L' ' || key.back() == L'\t'))
-                    key.pop_back();
-                size_t lead = 0;
-                while (lead < key.size() && (key[lead] == L' ' || key[lead] == L'\t'))
-                    ++lead;
-                if (lead) key.erase(0, lead);
+                // Strip inline ';comment' from the value before trimming.
+                // (Keys don't need this — '=' already terminates them.)
+                auto semi = val.find(L';');
+                if (semi != std::wstring::npos) val.erase(semi);
+
+                trim(key);
+                trim(val);
+
+                // Normalise key: lowercase, ensure leading dot.
                 for (auto& c : key) c = (wchar_t)towlower(c);
                 if (!key.empty() && key[0] != L'.') key.insert(0, L".");
 
+                // Skip [PreviewHandlers]-section keys that aren't
+                // extension overrides (notably ReportPath, which has
+                // already been read above via GetPrivateProfileStringW).
+                if (_wcsicmp(key.c_str(), L".reportpath") == 0) continue;
+
+                if (key.size() < 2)
+                {
+                    HostLog(L"  PreviewHandlers: skipping malformed key '%s'", key.c_str());
+                    continue;
+                }
+
                 // Validate the CLSID round-trips; reject garbage.
                 CLSID dummy;
-                if (key.size() >= 2 && SUCCEEDED(CLSIDFromString(val.c_str(), &dummy)))
+                if (SUCCEEDED(CLSIDFromString(val.c_str(), &dummy)))
                 {
                     g_extensionOverrides[key] = val;
+                    HostLog(L"  PreviewHandlers override: %s -> %s",
+                            key.c_str(), val.c_str());
                 }
-                // (Invalid entries are silently dropped here; we log them
-                // on first use from FindPreviewHandlerClsid where HostLog
-                // is already armed.)
+                else
+                {
+                    HostLog(L"  PreviewHandlers: REJECTED (bad CLSID) %s = %s",
+                            key.c_str(), val.c_str());
+                }
             }
         }
         delete[] sectionBuf;
@@ -928,19 +983,17 @@ static void AppendLineUtf8(std::string& outUtf8, const std::wstring& s)
 // requirement for the plugin to work.
 static void WriteAvailableHandlersReportSta()
 {
-    // Resolve %APPDATA%\GHISLER as the destination directory.
-    DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
-    if (needed == 0) return;
-    std::wstring appdata(needed, L'\0');
-    DWORD got = GetEnvironmentVariableW(L"APPDATA", appdata.data(), needed);
-    if (got == 0 || got >= needed) return;
-    appdata.resize(got);
+    // Opt-in via INI: [PreviewHandlers] ReportPath=<path>.  Empty
+    // path means the user hasn't asked for the report, so we don't
+    // generate anything (cheap silent skip on every host launch).
+    if (g_handlersReportPath.empty()) return;
 
-    const std::wstring destDir  = appdata + L"\\GHISLER";
-    const std::wstring destPath = destDir + L"\\TCOfficeView.available-handlers.txt";
-    const std::wstring tmpPath  = destPath + L".tmp";
+    const std::wstring& destPath = g_handlersReportPath;
+    const std::wstring  tmpPath  = destPath + L".tmp";
 
-    SHCreateDirectoryExW(nullptr, destDir.c_str(), nullptr);
+    // Create any missing parent directories so the user's chosen path
+    // can be a fresh location (e.g. %LocalAppData%\TCOfficeView\…).
+    EnsureParentDir(destPath);
 
     auto installed   = EnumerateInstalledPreviewHandlersFromHklm();
     auto assignments = EnumerateSystemHandlerAssignments();
@@ -3611,19 +3664,19 @@ int wmain(int argc, wchar_t** argv)
     // and keeps long-lived TC sessions from accumulating orphans.
     CleanupOrphanedJunctionsAtStartup();
 
-    // Regenerate %APPDATA%\GHISLER\TCOfficeView.available-handlers.txt
-    // on a low-priority background thread.  The report lists every
-    // preview handler installed on the machine and every extension
-    // assignment in effect, preformatted as commented-out INI lines
-    // the user can copy into [PreviewHandlers] to override.  Fire-
-    // and-forget — if it doesn't finish before the host exits, the
-    // previous file just stays in place; we'll regenerate again next
-    // time a Lister session is opened.
-    if (HANDLE hReportThread = CreateThread(nullptr, 0,
-                                            AvailableHandlersReportThread,
-                                            nullptr, 0, nullptr))
+    // Optional: regenerate the available-preview-handlers discovery
+    // report on a low-priority background thread.  Skipped entirely
+    // when the user hasn't enabled it ([PreviewHandlers] ReportPath
+    // is empty) so the host doesn't pay the registry-walk cost on
+    // every Lister session.
+    if (!g_handlersReportPath.empty())
     {
-        CloseHandle(hReportThread);
+        if (HANDLE hReportThread = CreateThread(nullptr, 0,
+                                                AvailableHandlersReportThread,
+                                                nullptr, 0, nullptr))
+        {
+            CloseHandle(hReportThread);
+        }
     }
 
     HRESULT hr = CoInitializeEx(nullptr,
