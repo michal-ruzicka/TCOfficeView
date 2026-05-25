@@ -1744,26 +1744,23 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
 
     if (isMotwBlocked)
     {
-        wchar_t lead[2048] = {};
-        _snwprintf_s(lead, _TRUNCATE,
-            L"This file is blocked because Windows marked it as coming\r\n"
-            L"from outside your computer.\r\n"
-            L"\r\n"
-            L"Microsoft Office and several other applications protect you\r\n"
-            L"from documents downloaded from the internet (or copied from a\r\n"
-            L"network share or an email attachment) by refusing to render\r\n"
-            L"their content until you explicitly approve them.  This is a\r\n"
-            L"defence against malicious macros, exploits and social-\r\n"
-            L"engineering files — please consider whether you trust this\r\n"
-            L"file's origin before lifting the block below.\r\n"
-            L"\r\n"
-            L"What the preview handler reported: HRESULT 0x%08lX.\r\n"
-            L"\r\n"
-            L"Source of the file\r\n"
-            L"  Zone:        %s (ZoneId=%d)\r\n",
-            static_cast<long>(hr),
-            ZoneIdName(motw.zoneId), motw.zoneId);
-        text += lead;
+        text += L"This file is blocked because Windows marked it as coming\r\n"
+                L"from outside your computer — downloaded from the internet,\r\n"
+                L"copied from a network share, or saved from an email\r\n"
+                L"attachment.\r\n"
+                L"\r\n"
+                L"Microsoft Office refuses to render such files until you\r\n"
+                L"explicitly trust them.  This protects you from malicious\r\n"
+                L"macros, exploits and weaponised documents.  Unblock only\r\n"
+                L"files whose source you trust.\r\n"
+                L"\r\n"
+                L"Source of the file\r\n";
+
+        wchar_t zoneLine[128] = {};
+        _snwprintf_s(zoneLine, _TRUNCATE,
+                     L"  Zone:        %s (ZoneId=%d)\r\n",
+                     ZoneIdName(motw.zoneId), motw.zoneId);
+        text += zoneLine;
 
         if (!motw.hostUrl.empty())
         {
@@ -1778,27 +1775,19 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
             text += L"\r\n";
         }
 
-        text += L"\r\n";
-        text += L"What clicking the \"Unblock\" button below will do\r\n";
-        text += L"\r\n";
-        text += L"  - Remove the \"downloaded from another computer\" mark\r\n";
-        text += L"    from this file by deleting its hidden\r\n";
-        text += L"    Zone.Identifier alternate data stream.\r\n";
-        text += L"  - Retry the preview.  If Office's Protected View was\r\n";
-        text += L"    the only reason rendering failed, the document will\r\n";
-        text += L"    now show normally.\r\n";
-        text += L"  - Affect only this specific file.  Other downloaded\r\n";
-        text += L"    files remain blocked.\r\n";
-        text += L"  - Be the equivalent of opening the document in Word /\r\n";
-        text += L"    Excel / PowerPoint and clicking \"Enable Editing\" in\r\n";
-        text += L"    the yellow security bar at the top — except you do\r\n";
-        text += L"    not have to leave the Lister pane.\r\n";
-        text += L"  - Be permanent: once unblocked, Windows treats the\r\n";
-        text += L"    file as locally created and Office will trust it\r\n";
-        text += L"    from now on.\r\n";
-        text += L"\r\n";
-        text += L"If you would rather inspect the file with another tool\r\n";
-        text += L"first, close this preview without clicking Unblock.\r\n";
+        text += L"\r\n"
+                L"Clicking \"Unblock\" below will:\r\n"
+                L"  - Remove the download mark from this file (this file\r\n"
+                L"    only).\r\n"
+                L"  - Retry the preview.\r\n"
+                L"  - Permanently mark the file as trusted on this\r\n"
+                L"    computer; Office will open it without warning from\r\n"
+                L"    now on.\r\n"
+                L"\r\n"
+                L"This is equivalent to clicking \"Enable Editing\" in\r\n"
+                L"Office's yellow security bar.  If you are unsure, close\r\n"
+                L"this preview and inspect the file with another tool\r\n"
+                L"first.\r\n";
     }
     else if (hr == REGDB_E_CLASSNOTREG)
     {
