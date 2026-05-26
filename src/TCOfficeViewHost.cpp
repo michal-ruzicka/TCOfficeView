@@ -103,6 +103,21 @@ static Mode         g_modeWord       = Mode::QuickSwitchable;   // default: quic
 static Mode         g_modeExcel      = Mode::QuickSwitchable;
 static Mode         g_modePowerPoint = Mode::QuickSwitchable;
 
+// Per-app auto-fallback toggles for the quick-switchable mode.  When the
+// configured mode is QuickSwitchable AND auto-fallback is enabled, a quick-
+// mode load failure for an Office file silently retries in full mode.  The
+// typical cause we are guarding against is SharePoint documents synced from
+// non-primary Microsoft 365 tenants: the prevhost.exe surrogate the Office
+// preview handlers run in cannot authenticate cross-tenant, so quick-mode
+// rendering fails with E_FAIL / E_NOTIMPL.  Spinning up the real Office app
+// (which runs as the user with full auth tokens) gets the preview through.
+// Defaults to true for all three apps; users who prefer the explicit
+// fallback panel over Office's slower cold-start can flip the toggle off
+// in [AutoFallback] in TCOfficeView.ini.
+static bool         g_autoFallbackWord       = true;
+static bool         g_autoFallbackExcel      = true;
+static bool         g_autoFallbackPowerPoint = true;
+
 // Per-extension preview-handler CLSID overrides from the INI's
 // [PreviewHandlers] section.  Keys are lowercase extensions with the
 // leading dot ("`.pdf`"), values are the raw CLSID string in braces
@@ -202,6 +217,30 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     g_modeWord       = readMode(L"Word",       Mode::QuickSwitchable);
     g_modeExcel      = readMode(L"Excel",      Mode::QuickSwitchable);
     g_modePowerPoint = readMode(L"PowerPoint", Mode::QuickSwitchable);
+
+    // [AutoFallback] — per-app quick→full auto-fallback toggles.  Only
+    // consulted when the configured Mode is `quick-switchable` (the user
+    // has opted into mode-switching for that app, so silently flipping
+    // modes on a per-file basis matches the spirit of that setting).
+    // Accepted values are true/false, yes/no, on/off, 1/0 — anything else
+    // (including missing) keeps the default of `true`.
+    auto readBool = [&buf, &iniPath](LPCWSTR section, LPCWSTR key, bool dflt) -> bool {
+        GetPrivateProfileStringW(section, key, L"",
+                                 buf, ARRAYSIZE(buf), iniPath.c_str());
+        if (buf[0] == L'\0') return dflt;
+        if (_wcsicmp(buf, L"true")  == 0) return true;
+        if (_wcsicmp(buf, L"false") == 0) return false;
+        if (_wcsicmp(buf, L"yes")   == 0) return true;
+        if (_wcsicmp(buf, L"no")    == 0) return false;
+        if (_wcsicmp(buf, L"on")    == 0) return true;
+        if (_wcsicmp(buf, L"off")   == 0) return false;
+        if (_wcsicmp(buf, L"1")     == 0) return true;
+        if (_wcsicmp(buf, L"0")     == 0) return false;
+        return dflt;
+    };
+    g_autoFallbackWord       = readBool(L"AutoFallback", L"Word",       true);
+    g_autoFallbackExcel      = readBool(L"AutoFallback", L"Excel",      true);
+    g_autoFallbackPowerPoint = readBool(L"AutoFallback", L"PowerPoint", true);
 
     // [PreviewHandlers] ReportPath — optional opt-in discovery aid.
     // When set to a non-empty file path the host writes a snapshot of
@@ -1404,6 +1443,11 @@ static bool CreateModeButtonSta()
 // SelectMode's actual definition appears later in the file.
 static Mode SelectMode(AppKind app);
 
+// Forward-declared so BuildFallbackText can tailor its hint for Office
+// files (Word / Excel / PowerPoint) without taking the AppKind as a
+// parameter.  Real definition lives next to SelectMode further down.
+static AppKind ClassifyByExtension(LPCWSTR path);
+
 // Refreshes the mode-switch button. Called after every LOAD and every
 // resize. Hides the button when the current file type doesn't support
 // the alternative mode (i.e. when neither Word, Excel nor PowerPoint
@@ -1825,10 +1869,52 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
                      L"This file could not be previewed.\r\n"
                      L"\r\n"
                      L"The registered preview handler failed to load it\r\n"
-                     L"(HRESULT 0x%08lX). Office may be installed but the\r\n"
-                     L"handler is broken or the file itself may be corrupted.\r\n",
+                     L"(HRESULT 0x%08lX).\r\n",
                      static_cast<long>(hr));
         text += lead;
+
+        const AppKind app = ClassifyByExtension(path);
+        const bool isOfficeApp = (app == AppKind::Word ||
+                                  app == AppKind::Excel ||
+                                  app == AppKind::PowerPoint);
+
+        if (isOfficeApp)
+        {
+            text += L"\r\n"
+                    L"Common causes for Office files:\r\n"
+                    L"  - The document is on a SharePoint site synced from a\r\n"
+                    L"    Microsoft 365 tenant other than your primary one —\r\n"
+                    L"    the sandboxed preview-handler process cannot\r\n"
+                    L"    authenticate cross-tenant.  Files affected by this\r\n"
+                    L"    also refuse to preview in Windows Explorer's Alt+P\r\n"
+                    L"    pane; it is an Office limitation, not a\r\n"
+                    L"    TCOfficeView one.\r\n"
+                    L"  - The document is corrupted or uses a format the\r\n"
+                    L"    handler does not recognise.\r\n"
+                    L"  - The Office installation is broken.\r\n";
+
+            // The "→ Full" hint only makes sense when the mode-switch
+            // button is actually on screen.  IsSwitchable() returns false
+            // for the explicit `quick` (non-switchable) configuration —
+            // the user has opted out of mode switching and the button
+            // is hidden, so pointing at it would just confuse.
+            if (IsSwitchable(SelectMode(app)))
+            {
+                text += L"\r\n"
+                        L"Tip: click the \"→ Full\" button in the top-right\r\n"
+                        L"corner of this pane to open the document in the real\r\n"
+                        L"Office application instead.  It runs as your user\r\n"
+                        L"with full credentials and can usually open files the\r\n"
+                        L"preview handler refuses.\r\n";
+            }
+        }
+        else
+        {
+            text += L"\r\n"
+                    L"The application that registered the handler may be\r\n"
+                    L"installed but broken, or the file itself may be\r\n"
+                    L"corrupted.\r\n";
+        }
     }
 
     text += L"\r\n";
@@ -2086,6 +2172,17 @@ static Mode SelectMode(AppKind app)
         case AppKind::Excel:      return g_modeExcel;
         case AppKind::PowerPoint: return g_modePowerPoint;
         default:                  return Mode::Quick;
+    }
+}
+
+static bool IsAutoFallbackEnabled(AppKind app)
+{
+    switch (app)
+    {
+        case AppKind::Word:       return g_autoFallbackWord;
+        case AppKind::Excel:      return g_autoFallbackExcel;
+        case AppKind::PowerPoint: return g_autoFallbackPowerPoint;
+        default:                  return false;
     }
 }
 
@@ -3342,10 +3439,15 @@ static void UnloadHandlerSta()
     PurgeOrphanRenderChildrenSta();
 }
 
-static HRESULT LoadHandlerSta(LPCWSTR path)
+// Attempt a quick-mode preview-handler load.  Returns S_OK on real success
+// (g_state.pHandler / pHandlerUnk now hold live references) or the actual
+// failure HRESULT.  Does NOT show the fallback panel — that's the caller's
+// decision, so quick-mode failure can be retried in full mode for Office
+// files before the user ever sees an error.
+static HRESULT TryLoadHandlerSta(LPCWSTR path)
 {
     UnloadHandlerSta();
-    HostLog(L"LoadHandlerSta: path='%s' render=0x%p", path, g_state.hwndRender);
+    HostLog(L"TryLoadHandlerSta: path='%s' render=0x%p", path, g_state.hwndRender);
 
     // Long-path policy in this function: pass the RAW path everywhere.
     //
@@ -3366,10 +3468,9 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     HRESULT hr = FindPreviewHandlerClsid(path, &clsid);
     if (FAILED(hr))
     {
-        HostLog(L"  FindPreviewHandlerClsid -> 0x%08lX, showing fallback",
+        HostLog(L"  FindPreviewHandlerClsid -> 0x%08lX",
                 static_cast<long>(hr));
-        ShowFallbackSta(path, hr);
-        return S_OK;
+        return hr;
     }
     {
         wchar_t clsidStr[64] = {};
@@ -3396,10 +3497,9 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     if (FAILED(hr))
     {
         // Handler is registered but the server cannot be activated — typically
-        // a partial / broken Office install. Show the fallback UI rather than
-        // an empty pane.
-        ShowFallbackSta(path, hr);
-        return S_OK;
+        // a partial / broken Office install.  Caller decides whether to retry
+        // in full mode (for Office files) or show the fallback panel.
+        return hr;
     }
 
     // Microsoft's recommended call order for hosting a preview handler is:
@@ -3415,8 +3515,7 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     if (FAILED(hr))
     {
         pUnk->Release();
-        ShowFallbackSta(path, hr);
-        return S_OK;
+        return hr;
     }
 
     // Install the site (best-effort: a handler that doesn't implement
@@ -3523,7 +3622,7 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
 
     if (!initialized)
     {
-        HostLog(L"  no Initialize* interface succeeded — showing fallback");
+        HostLog(L"  no Initialize* interface succeeded");
         // Drop the site we installed earlier before releasing the handler.
         {
             IObjectWithSite* pOws = nullptr;
@@ -3536,9 +3635,7 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
         }
         pPH->Release();
         pUnk->Release();
-        HRESULT reason = FAILED(hr) ? hr : E_NOINTERFACE;
-        ShowFallbackSta(path, reason);
-        return S_OK;
+        return FAILED(hr) ? hr : E_NOINTERFACE;
     }
 
     RECT rc = {};
@@ -3566,8 +3663,7 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
         }
         pPH->Release();
         pUnk->Release();
-        ShowFallbackSta(path, hr);
-        return S_OK;
+        return hr;
     }
 
     g_state.pHandlerUnk = pUnk;
@@ -3579,7 +3675,18 @@ static HRESULT LoadHandlerSta(LPCWSTR path)
     RedrawWindow(g_state.hwndRender, nullptr, nullptr,
                  RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 
-    HostLog(L"  LoadHandlerSta SUCCESS");
+    HostLog(L"  TryLoadHandlerSta SUCCESS");
+    return S_OK;
+}
+
+// Wrapper used when the caller doesn't want to handle preview-handler
+// failure itself: shows the fallback panel on any failure HRESULT and
+// always returns S_OK to the pipe (TC keeps the Lister window either way).
+static HRESULT LoadHandlerSta(LPCWSTR path)
+{
+    HRESULT hr = TryLoadHandlerSta(path);
+    if (FAILED(hr))
+        ShowFallbackSta(path, hr);
     return S_OK;
 }
 
@@ -3758,7 +3865,18 @@ static void CleanupOrphanedJunctionsAtStartup()
 // Internal worker for LoadFileSta. Mode is supplied explicitly so the
 // user-initiated WM_HOST_SWITCH_MODE handler can force the opposite of
 // the INI-configured default for the current preview.
-static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode)
+//
+// `allowAutoFallback` controls the implicit quick→full retry for Office
+// files whose quick-mode load failed.  The initial LOAD path (LoadFileSta,
+// via WM_HOST_LOAD) passes `true` so SharePoint multi-tenant documents
+// "just work".  WM_HOST_SWITCH_MODE passes `false` — the user has
+// explicitly asked for a specific mode and an implicit retry would either
+// (a) bounce them back to the mode they were trying to leave, or
+// (b) silently ignore their click.  When the user-initiated switch lands
+// on the fallback panel, the mode-switch button updates to point at the
+// other mode so the user can flip back deliberately.
+static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode,
+                                   bool allowAutoFallback = true)
 {
     if (g_state.loadingInProgress)
     {
@@ -3886,7 +4004,109 @@ static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode)
         if (g_state.hwndExcelApp) { CloseExcelWorkbookSta(); DetachExcelWindowSta(); }
         if (g_state.hwndPptApp)   { ClosePptPresentationSta(); DetachPptWindowSta(); }
 
-        result = LoadHandlerSta(path);
+        HRESULT quickHr = TryLoadHandlerSta(path);
+        result = S_OK;
+
+        // Auto-fallback quick → full for Office files when the preview
+        // handler refused them.  Typical trigger is SharePoint documents
+        // synced from non-primary Microsoft 365 tenants: the prevhost.exe
+        // surrogate the Office preview handler runs in can't authenticate
+        // cross-tenant, so quick mode fails with E_FAIL / E_NOTIMPL.  The
+        // real Office app, running as the user with full auth tokens, can
+        // open the same file fine.  (The same limit affects Explorer's
+        // Alt+P pane — it's an Office surrogate restriction, not a
+        // TCOfficeView issue — so the auto-fallback is the user-visible
+        // fix.)
+        //
+        // Gated on six conditions to keep the implicit mode switch
+        // predictable:
+        //   1) The caller permits it (allowAutoFallback).  WM_HOST_LOAD
+        //      passes true (initial open should "just work" for SharePoint
+        //      cross-tenant files); WM_HOST_SWITCH_MODE passes false (the
+        //      user just clicked → Quick and an implicit bounce back to
+        //      Full would feel like the button did nothing).
+        //   2) The file is Office (Word / Excel / PowerPoint).
+        //   3) The user has configured `quick-switchable` for that app —
+        //      i.e. they have already opted into mode switching being a
+        //      sensible thing to happen for this app type.  `quick`
+        //      (non-switchable) means the user explicitly wants quick
+        //      only, even on failure.
+        //   4) [AutoFallback] for that app is true in the INI (default).
+        //   5) We didn't already arrive here from a failed full-mode
+        //      attempt (would loop forever).
+        //   6) The file is NOT Mark-of-the-Web blocked.  MOTW files have
+        //      their own dedicated fallback panel with the "Unblock"
+        //      button — auto-fallback to full would bypass that UX (and
+        //      worse, open the file editably because ReadOnly=True at the
+        //      Office app level skips Protected View).  Same MOTW guard
+        //      that the explicit-full path enforces earlier in this
+        //      function.
+        const bool isOfficeApp =
+            (app == AppKind::Word || app == AppKind::Excel ||
+             app == AppKind::PowerPoint);
+        const bool isMotwBlocked =
+            isOfficeApp && (ReadFileZoneInfo(origPath).zoneId >= 3);
+        const bool fallbackPermitted =
+            allowAutoFallback &&
+            isOfficeApp &&
+            !fellThroughFull &&
+            !isMotwBlocked &&
+            SelectMode(app) == Mode::QuickSwitchable &&
+            IsAutoFallbackEnabled(app);
+
+        if (FAILED(quickHr) && fallbackPermitted)
+        {
+            HostLog(L"  quick mode failed (0x%08lX) for Office file — "
+                    L"auto-fallback to full",
+                    static_cast<long>(quickHr));
+            HRESULT fullHr = E_FAIL;
+            LPCWSTR appName = L"?";
+            if (app == AppKind::Word)
+            {
+                appName = L"Word";
+                fullHr = LoadWordFullSta(path);
+            }
+            else if (app == AppKind::Excel)
+            {
+                appName = L"Excel";
+                fullHr = LoadExcelFullSta(path);
+            }
+            else if (app == AppKind::PowerPoint)
+            {
+                appName = L"PowerPoint";
+                fullHr = LoadPowerPointFullSta(path);
+            }
+
+            if (SUCCEEDED(fullHr))
+            {
+                HostLog(L"  %s full-mode auto-fallback SUCCESS", appName);
+                g_state.currentLoadedMode = Mode::Full;
+                if (g_state.hwndRender)
+                    SetTimer(g_state.hwndRender, kModeButtonZTimerId,
+                             400, nullptr);
+            }
+            else
+            {
+                HostLog(L"  %s full-mode auto-fallback also failed (0x%08lX) "
+                        L"— showing fallback panel with quick-mode error",
+                        appName, static_cast<long>(fullHr));
+                UnloadWordFullSta(true);
+                UnloadExcelFullSta(true);
+                UnloadPptFullSta(true);
+                // Show the quick-mode HRESULT, not the full-mode one — it
+                // describes the actual rejection of the file's content
+                // (MOTW, IRM, missing handler, …) rather than a generic
+                // Office startup failure.
+                ShowFallbackSta(path, quickHr);
+            }
+        }
+        else if (FAILED(quickHr))
+        {
+            // Non-Office file, fallback disabled, or full already failed
+            // for this load — just show the fallback panel.
+            ShowFallbackSta(path, quickHr);
+        }
+
         UpdateModeButtonSta();
         // Quick-mode preview handlers may also do async window layout; a
         // shorter delay is enough since they don't need Office startup time.
@@ -4011,7 +4231,18 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             // LoadFileWithModeSta overwrites g_state.currentFile early on
             // (which would invalidate the c_str() pointer mid-call).
             std::wstring path = g_state.currentFile;
-            HRESULT hr = LoadFileWithModeSta(path.c_str(), g_state.currentFileApp, target);
+            // allowAutoFallback=false: the user explicitly asked for `target`,
+            // so the implicit quick→full retry path must NOT kick in here.
+            // Otherwise a user who clicks → Quick on a file that auto-fell-
+            // back to full at load time would simply bounce back to full
+            // and the click would look like a no-op.  When `target` is Quick
+            // and the preview handler still refuses the file, ShowFallbackSta
+            // shows the fallback panel and the mode-switch button auto-flips
+            // back to → Full so the user can return deliberately.
+            HRESULT hr = LoadFileWithModeSta(path.c_str(),
+                                             g_state.currentFileApp,
+                                             target,
+                                             /*allowAutoFallback=*/false);
             if (FAILED(hr))
             {
                 HostLog(L"WM_HOST_SWITCH_MODE: LoadFileWithModeSta failed hr=0x%08lX",

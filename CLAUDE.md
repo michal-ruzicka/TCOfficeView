@@ -162,6 +162,12 @@ Sections currently honoured:
   `quick-switchable` (default), `quick`, `full-switchable`, `full`.
   `BaseMode()` extracts the actual loader mode (Quick/Full);
   `IsSwitchable()` says whether to show the overlay button.
+- `[AutoFallback] Word=` / `Excel=` / `PowerPoint=` — per-app toggle
+  (default `true`) for the quick→full auto-fallback path described
+  below. Accepts true/false, yes/no, on/off, 1/0. Read into
+  `g_autoFallbackWord` / `g_autoFallbackExcel` /
+  `g_autoFallbackPowerPoint` and read back at run time via
+  `IsAutoFallbackEnabled(app)`.
 
 The fallback panel is a child `EDIT` control inside `hwndRender`,
 created on any failure from `FindPreviewHandlerClsid` /
@@ -170,6 +176,83 @@ created on any failure from `FindPreviewHandlerClsid` /
 plugin in that case — the file was "shown", just via the fallback. The
 panel is sized in `ResizeHandlerSta` and torn down in
 `UnloadHandlerSta`.
+
+`LoadHandlerSta` is a thin wrapper around `TryLoadHandlerSta`. The
+`Try` variant returns the actual failure `HRESULT` instead of
+silently showing the fallback panel; the wrapper calls
+`ShowFallbackSta(path, hr)` on failure. The split lets the caller
+(`LoadFileWithModeSta`'s quick path) detect quick-mode failure
+*before* the user sees anything and silently retry in full mode for
+Office files — see "Auto-fallback quick→full" below.
+
+### Auto-fallback quick→full for SharePoint multi-tenant files
+
+Files synced from SharePoint sites in non-primary Microsoft 365
+tenants typically fail to render in quick mode (preview handler
+returns `E_FAIL` from `DoPreview`, or `E_NOTIMPL` from
+`IInitializeWithFile`). This is an Office-side limit, not ours: the
+preview handlers run in the `prevhost.exe` surrogate process and
+cannot authenticate cross-tenant. The same files refuse to preview
+in **Explorer's Alt+P / Preview Pane** for the same reason —
+verify there before suspecting our code if the issue resurfaces.
+
+The real Office app (`winword.exe` / `excel.exe` / `powerpnt.exe`)
+runs as the user with full auth tokens and usually opens the same
+file fine. The auto-fallback path in `LoadFileWithModeSta` exploits
+that: when `TryLoadHandlerSta` returns failure for an Office file
+the code attempts `LoadXxxFullSta` immediately and only shows the
+fallback panel if that also fails.
+
+Gated on five conditions, all of which must hold:
+
+1. `app` is Word, Excel or PowerPoint.
+2. `SelectMode(app) == Mode::QuickSwitchable` — the user has opted
+   into per-file mode switching for that app, so the implicit
+   switch matches expectation. `Mode::Quick` is treated as "quick
+   only, no fallback" by design.
+3. `IsAutoFallbackEnabled(app)` is true (the `[AutoFallback]` INI
+   toggle).
+4. `!fellThroughFull` — we did not arrive at the quick path via a
+   full-mode failure ourselves. Without this guard a file that
+   fails in both modes would loop forever.
+5. `ReadFileZoneInfo(origPath).zoneId < 3` — file is NOT MOTW-
+   blocked. MOTW files have their own dedicated fallback panel
+   with an Unblock button; auto-falling-back to full would bypass
+   that UX *and* open the file editably (Office's
+   `Documents.Open(ReadOnly=True)` skips Protected View, so the
+   document would not be protected from accidental edits). Same
+   MOTW guard the explicit-full path enforces earlier in
+   `LoadFileWithModeSta`.
+
+On auto-fallback success the code sets
+`g_state.currentLoadedMode = Mode::Full` so the mode-switch button
+shows `→ Quick` (correctly reflecting the current state) and the
+button click handler swaps the right direction.
+
+`LoadFileWithModeSta` takes an `allowAutoFallback` parameter
+(default `true`). The initial-LOAD path (`LoadFileSta`, the
+`WM_HOST_LOAD` pipe command) leaves it at the default so SharePoint
+multi-tenant documents "just work". The user-initiated
+`WM_HOST_SWITCH_MODE` handler passes `false`: when the user clicks
+`→ Quick` on a document that auto-fell-back to full at load time,
+the click is treated as an explicit "I want quick mode here"
+instruction. Without this guard the click would just trigger
+auto-fallback again and feel like the button did nothing. The
+fallback panel is shown instead and `UpdateModeButtonSta` flips the
+overlay button to `→ Full` so the user can return deliberately.
+
+`WM_HOST_UNBLOCK_AND_RELOAD` keeps the default `true` — after the
+ADS strip the file is no longer MOTW and a SharePoint cross-tenant
+failure on the reload should still benefit from auto-fallback.
+
+The generic-failure branch of `BuildFallbackText` (the non-MOTW,
+non-`REGDB_E_CLASSNOTREG` path) calls `ClassifyByExtension(path)`
+and, for Office files, expands the message with the SharePoint
+multi-tenant cause and an Explorer-Alt+P-parity note. When the
+file's app is in a `IsSwitchable(...)` mode the message also
+includes a "click → Full" hint pointing at the mode-switch button.
+The hint is suppressed when the user has configured plain `quick`
+(non-switchable) since the button would not be visible.
 
 ## Mode dispatch (quick vs full)
 

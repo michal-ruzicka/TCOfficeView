@@ -273,6 +273,80 @@ Full mode tradeoffs to be aware of:
   ribbon, for example, stays visible in the preview because hiding
   it would hijack your global Office settings.
 
+#### Auto-Fallback for Multi-Tenant SharePoint Documents
+
+Documents synced from a SharePoint site in a Microsoft 365 tenant
+other than your primary one (for example, an external organisation
+you collaborate with) often refuse to render in quick mode. You see
+the fallback panel with an HRESULT such as `0x80004005` (E_FAIL) or
+`0x80004001` (E_NOTIMPL) and the message "The registered preview
+handler failed to load it".
+
+This is an **Office-side limitation**, not a TCOfficeView one. The
+preview handler runs in a sandboxed Windows surrogate process
+(`prevhost.exe`) that does not have the credentials needed to
+authenticate against the second tenant. The same files therefore
+also refuse to preview in **Windows Explorer's Alt+P / Preview
+Pane** — try it on the same document to confirm.
+
+The full-mode renderer (the real Word / Excel / PowerPoint
+application launched in the background) runs as your user with full
+access to your authentication tokens, so it usually succeeds where
+the preview handler fails.
+
+TCOfficeView can detect this situation and retry the preview in full
+mode automatically. The feature is controlled per application from
+the `[AutoFallback]` section in `TCOfficeView.ini`:
+
+```ini
+[AutoFallback]
+Word=true        ; default
+Excel=true       ; default
+PowerPoint=true  ; default
+```
+
+Default behaviour (`true` for all three) — when the preview handler
+refuses an Office file:
+
+1. The plugin silently launches the real Office application.
+2. The document opens in full mode (read-only) and replaces the
+   error panel.
+3. You see a working preview a couple of seconds later instead of
+   an error message.
+
+Auto-fallback only kicks in when **all** of these hold:
+
+- The file is a Word, Excel or PowerPoint document.
+- The application's `[Mode]` is set to `quick-switchable` (the
+  default). The explicit `quick` mode is treated as "user wants
+  quick only, period" — the fallback panel is shown without
+  retrying. For `full` / `full-switchable` the question does not
+  arise, the preview is already in full mode.
+- The toggle for that application above is `true`.
+- The file is **not** marked with Mark-of-the-Web (downloaded from
+  the internet, copied from a network share, or saved from an email
+  attachment). MOTW-blocked files keep the dedicated fallback panel
+  with the **Unblock this file and retry the preview** button so
+  you can review the source URL and make the trust decision
+  explicitly. Loading them in full mode would bypass Office's
+  Protected View (`ReadOnly=True` at the application level skips
+  Protected View) and open the document editably — a security
+  regression we do not want.
+
+Set the toggle to `false` for an application if you would rather see
+the explicit fallback panel (with the preview handler's HRESULT for
+diagnosis) and decide for yourself whether to click `→ Full` to
+load the file in the real application.
+
+When auto-fallback has loaded a document in full mode and you then
+click the `→ Quick` overlay button, the click is treated as an
+explicit "I want quick mode" instruction and **auto-fallback does
+not run again**. Without this guard the same click would bounce the
+document straight back to full mode and the button would appear to
+do nothing. Instead, the quick fallback panel is shown — explaining
+why the preview handler refuses the file — and the overlay button
+flips to `→ Full` so you can return to full mode deliberately.
+
 #### Preview Handler Overrides
 
 Under `[PreviewHandlers]` you can override which preview handler is used
