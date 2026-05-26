@@ -216,13 +216,23 @@ Gated on five conditions, all of which must hold:
    full-mode failure ourselves. Without this guard a file that
    fails in both modes would loop forever.
 5. `ReadFileZoneInfo(origPath).zoneId < 3` — file is NOT MOTW-
-   blocked. MOTW files have their own dedicated fallback panel
-   with an Unblock button; auto-falling-back to full would bypass
-   that UX *and* open the file editably (Office's
-   `Documents.Open(ReadOnly=True)` skips Protected View, so the
-   document would not be protected from accidental edits). Same
-   MOTW guard the explicit-full path enforces earlier in
-   `LoadFileWithModeSta`.
+   blocked. MOTW is by far the most common reason quick fails on
+   an otherwise-healthy handler, and the typical fix is a single
+   Unblock click that lets the file render in quick mode — which
+   is simpler and lighter than full mode. We prefer to surface the
+   Unblock button and let the user decide rather than silently
+   start a heavyweight Office process. The cross-tenant case (file
+   is MOTW AND would also fail quick after unblock) is handled
+   naturally by the second LOAD that the Unblock click triggers:
+   the file is no longer MOTW so this gate doesn't fire, and the
+   SharePoint cross-tenant failure proceeds cleanly into auto-
+   fallback.
+
+The explicit-full path (`mode == Mode::Full` above) deliberately
+does NOT have a corresponding MOTW pre-check. Office's Automation
+pipeline applies Protected View on its own for MOTW files (yellow
+"Enable Editing" banner, content visible in a read-only sandbox),
+which is the right outcome when the user has asked for full mode.
 
 On auto-fallback success the code sets
 `g_state.currentLoadedMode = Mode::Full` so the mode-switch button
@@ -244,6 +254,15 @@ overlay button to `→ Full` so the user can return deliberately.
 `WM_HOST_UNBLOCK_AND_RELOAD` keeps the default `true` — after the
 ADS strip the file is no longer MOTW and a SharePoint cross-tenant
 failure on the reload should still benefit from auto-fallback.
+
+The Unblock button itself is added by `ShowFallbackSta` whenever
+the fallback panel is shown for a MOTW-blocked file
+(`ReadFileZoneInfo(path).zoneId >= 3`). That naturally restricts
+its visibility to the quick-mode failure path — the only way the
+fallback panel is displayed now that the full-mode pre-check is
+gone. If the user is configured for full mode (or auto-fallback
+landed them there) Office shows its own Protected View UI and the
+Unblock button never appears.
 
 The generic-failure branch of `BuildFallbackText` (the non-MOTW,
 non-`REGDB_E_CLASSNOTREG` path) calls `ClassifyByExtension(path)`

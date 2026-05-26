@@ -325,12 +325,29 @@ Auto-fallback only kicks in when **all** of these hold:
 - The toggle for that application above is `true`.
 - The file is **not** marked with Mark-of-the-Web (downloaded from
   the internet, copied from a network share, or saved from an email
-  attachment). MOTW-blocked files keep the dedicated fallback panel
-  with the **Unblock this file** button so you can review the
-  source URL and make the trust decision explicitly. Loading them in full mode would bypass Office's
-  Protected View (`ReadOnly=True` at the application level skips
-  Protected View) and open the document editably — a security
-  regression we do not want.
+  attachment). MOTW is by far the most common reason an otherwise-
+  healthy quick-mode handler refuses to render an Office file, and
+  the typical fix is a single click on the **Unblock this file**
+  button that the fallback panel offers. Once the file is unblocked
+  it usually renders fine in quick mode, which is simpler and
+  lighter than full mode — so we prefer to surface the Unblock
+  button rather than silently flip the document into the real
+  Office application.
+
+  Cross-tenant SharePoint documents that are ALSO marked with MOTW
+  are handled naturally by this design: after the user clicks
+  Unblock, the file is reloaded; quick still fails (the cross-
+  tenant authentication issue is independent of MOTW), and at that
+  point the MOTW guard no longer fires and auto-fallback proceeds
+  to full mode as usual. The Unblock click was technically a wasted
+  step in that case, but the user only pays it once per file.
+
+When the application is explicitly configured for `full` or
+`full-switchable`, the MOTW pre-check does not apply — the document
+flows directly into the real Office application, which displays its
+own Protected View (yellow "Enable Editing" banner, content visible
+in a read-only sandbox). MOTW handling there is left entirely to
+Office.
 
 Set the toggle to `false` for an application if you would rather see
 the explicit fallback panel (with the preview handler's HRESULT for

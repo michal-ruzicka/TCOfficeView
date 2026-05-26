@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Mark-of-the-Web handling delegated to Office in full mode only.**
+  TCOfficeView previously intercepted MOTW-blocked files before
+  full-mode load and forced them through our own Unblock fallback
+  panel — out of concern that `Documents.Open(ReadOnly=True)` might
+  bypass Office's Protected View.  In practice Word, Excel and
+  PowerPoint apply Protected View automatically to MOTW files
+  opened via Automation (yellow "Enable Editing" banner, content
+  visible in a read-only sandbox), so this pre-check served no
+  purpose for the user.  It has been removed from the explicit-full
+  branch of `LoadFileWithModeSta` — MOTW files configured for `full`
+  or `full-switchable` now flow straight into Office, which displays
+  its own Protected View banner.
+
+  The auto-fallback path (quick-switchable) still skips MOTW files
+  on purpose.  MOTW is the most common reason a quick handler
+  refuses to render an Office file, and a single click on the
+  **Unblock this file** button restores quick mode — which is
+  simpler and lighter than full.  Silently auto-falling-back to
+  full would deprive users of that simpler path.  Cross-tenant
+  SharePoint documents that are also MOTW resolve naturally: after
+  Unblock the file reloads, quick still fails (cross-tenant
+  authentication is independent of MOTW), and at that second LOAD
+  the MOTW guard no longer fires so auto-fallback proceeds to full
+  mode as usual.
+
 ## [v2.2.2] – 2026-05-26
 
 > **Upgrading from an earlier version?**  Total Commander keeps an

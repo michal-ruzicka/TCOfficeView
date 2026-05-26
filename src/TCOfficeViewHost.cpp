@@ -3907,35 +3907,19 @@ static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode,
     HRESULT result          = E_FAIL;
     bool    fellThroughFull = false;        // full mode failed → try quick
 
-    // If the file has MOTW and we're about to open it in full mode, skip
-    // directly to fallback. Opening a MOTW-blocked file in the real Office
-    // app would load it in an editable state (not Protected View) because
-    // ReadOnly=True bypasses Protected View. Show the fallback instead.
-    {
-        const MotwInfo motw = ReadFileZoneInfo(path);
-        if (motw.zoneId >= 3 && mode == Mode::Full)
-        {
-            HostLog(L"  MOTW detected (ZoneId=%d), skipping full mode — showing fallback",
-                    motw.zoneId);
-            // Tear down any previously-embedded Office app so the fallback
-            // panel isn't visually hidden behind it.  This is the same
-            // light-weight cleanup that the quick-mode fall-through path
-            // below performs: documents close, but the Office processes
-            // stay alive so the next non-MOTW Full-mode load is fast.
-            if (g_state.hwndWordApp)  { CloseWordDocumentSta();    DetachWordWindowSta(); }
-            if (g_state.hwndExcelApp) { CloseExcelWorkbookSta();   DetachExcelWindowSta(); }
-            if (g_state.hwndPptApp)   { ClosePptPresentationSta(); DetachPptWindowSta(); }
-            // Show the original user-visible path, not the junction alias.
-            ShowFallbackSta(origPath, E_FAIL);
-            // Clean up the previous LOAD's junction (we didn't reach the
-            // function's normal cleanup at the bottom because of the
-            // early return); also retry any older stale junctions.
-            TryRemoveJunctionSta(prevJunctionDir);
-            RetryStaleJunctionsSta();
-            g_state.loadingInProgress = false;
-            return S_OK;
-        }
-    }
+    // Mark-of-the-Web handling is intentionally NOT pre-checked here.
+    // Word / Excel / PowerPoint have their own Protected View pipeline
+    // that engages on MOTW files when opened via Automation — the
+    // document opens in a read-only quarantined state with the familiar
+    // yellow "Enable Editing" bar, exactly as it would if the user
+    // double-clicked the file in Explorer.  Our previous early return
+    // for `motw.zoneId >= 3 && mode == Mode::Full` ended up second-
+    // guessing Office and forced the user through our own Unblock UI
+    // even when they had explicitly configured full mode.  The Unblock
+    // button only makes sense when the user has actually landed on the
+    // fallback panel (quick mode failed and there's no way forward
+    // without either unblocking or switching modes); `ShowFallbackSta`
+    // adds it there based on its own MOTW check.
 
     if (mode == Mode::Full)
     {
@@ -4027,13 +4011,26 @@ static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode,
         //   4) [AutoFallback] for that app is true in the INI (default).
         //   5) We didn't already arrive here from a failed full-mode
         //      attempt (would loop forever).
-        //   6) The file is NOT Mark-of-the-Web blocked.  MOTW files have
-        //      their own dedicated fallback panel with the "Unblock"
-        //      button — auto-fallback to full would bypass that UX (and
-        //      worse, open the file editably because ReadOnly=True at the
-        //      Office app level skips Protected View).  Same MOTW guard
-        //      that the explicit-full path enforces earlier in this
-        //      function.
+        //
+        //   6) The file is NOT Mark-of-the-Web blocked.  MOTW is the
+        //      most common reason an otherwise-healthy quick handler
+        //      returns E_FAIL; on the typical "downloaded file from a
+        //      trustworthy source" case unblocking is one click and
+        //      the document then renders in quick mode — which is
+        //      simpler, lighter and better-behaved than full mode.
+        //      We therefore prefer to surface the Unblock button and
+        //      let the user decide, rather than silently spinning up
+        //      the real Office app.  The cross-tenant case (file is
+        //      MOTW AND would also fail quick after the unblock) is
+        //      handled by the second LOAD that the Unblock click
+        //      triggers: by then the file is no longer MOTW so this
+        //      gate does not fire, and the SharePoint cross-tenant
+        //      failure proceeds cleanly to auto-fallback.  Note: the
+        //      explicit-full path (`mode == Mode::Full` above)
+        //      deliberately does NOT have this guard — Office's
+        //      Automation pipeline applies Protected View on its own
+        //      for MOTW files, which is the right outcome when the
+        //      user has asked for full mode.
         const bool isOfficeApp =
             (app == AppKind::Word || app == AppKind::Excel ||
              app == AppKind::PowerPoint);
