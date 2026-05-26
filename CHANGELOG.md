@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.2.2] – 2026-05-26
+
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1.0 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
+
+### Added
+
+- **Auto-fallback from quick to full mode for Office documents the
+  preview handler refuses to render.**  Files synced from a SharePoint
+  site in a non-primary Microsoft 365 tenant typically fail in quick
+  mode with HRESULT `0x80004005` (E_FAIL) or `0x80004001` (E_NOTIMPL) —
+  the preview handler's sandboxed surrogate process can't authenticate
+  cross-tenant.  This is an Office-side limitation that affects
+  Windows Explorer's Alt+P / Preview Pane the same way; it isn't
+  specific to TCOfficeView.  When this happens TCOfficeView now
+  silently retries the preview by launching the real Office
+  application in the background (which runs as the user with full
+  auth tokens and usually succeeds).  Controlled per application from
+  a new `[AutoFallback]` INI section — `Word=true` / `Excel=true` /
+  `PowerPoint=true` (default for all three).  Auto-fallback only
+  kicks in when the application is in the `quick-switchable` mode
+  (the default); explicit `quick` mode opts the application out.
+  Mark-of-the-Web-blocked files keep their dedicated Unblock
+  fallback panel — they are intentionally excluded from auto-
+  fallback because opening them in the real Office app would
+  bypass Protected View.  See `README.md` → Configuration →
+  Auto-Fallback for Multi-Tenant SharePoint Documents.
+- **User-initiated mode switch suppresses auto-fallback.**  When
+  the user clicks the `→ Quick` overlay button on a document that
+  auto-fell-back to full at load time, the click is now treated as
+  an explicit "I want quick mode here" instruction — auto-fallback
+  is skipped so the click does not silently bounce the document
+  back to full mode.  Instead the quick fallback panel is shown
+  (with an Office-specific explanation of why the preview handler
+  refuses the file) and the overlay button flips to `→ Full` so
+  the user can return to full mode deliberately.
+- **Office-aware text in the generic fallback panel.**  For Word,
+  Excel and PowerPoint files the "preview handler failed" message
+  now lists the common causes (SharePoint cross-tenant sync,
+  corrupted document, broken Office install) and notes the
+  Explorer-Alt+P-parity behaviour.  When the file's application
+  is in a switchable mode, a `→ Full` button hint is included.
+
 ## [v2.2.1] – 2026-05-26
 
 > **Upgrading from an earlier version?**  Total Commander keeps an
@@ -595,6 +641,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[v2.2.2]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.1...v2.2.2
 [v2.2.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.0.0...v2.1.0
