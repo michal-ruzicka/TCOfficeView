@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Small UX improvements.
+
 ### Changed
 
 - **Mark-of-the-Web handling delegated to Office in full mode only.**
@@ -33,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authentication is independent of MOTW), and at that second LOAD
   the MOTW guard no longer fires so auto-fallback proceeds to full
   mode as usual.
+- **Small UI improvements.**
+
+### Fixed
+
+- **Close-button guard now fully covers Office's title-bar X.**
+  The invisible overlay that swallows clicks aimed at the embedded
+  Word / Excel / PowerPoint close button was 40 px tall, which on
+  current Office builds left the bottom edge of the X glyph poking
+  out below the guard — close enough for a user to hit it
+  accidentally.  The guard is now 54 px tall (DPI-scaled, applied in
+  both `CreateCloseGuard` and `ResizeHandlerSta`).
 
 ## [v2.2.2] – 2026-05-26
 

@@ -2616,13 +2616,16 @@ static void CreateCloseGuard()
 
     UINT dpi = GetDpiForWindow(g_state.hwndRender);
     if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
-    // Cover the full width of the render pane and the top ~40 px where the
+    // Cover the full width of the render pane and the top ~54 px where the
     // Office ribbon / title bar lives. This blocks both the close button
     // and the context menu that appears on a right-click in the title area.
+    // The exact height needs to be enough to fully hide the close button on
+    // current Office builds — 40 px was a touch short, leaving the bottom
+    // edge of the X glyph poking out below the guard.
     RECT rc;
     GetClientRect(g_state.hwndRender, &rc);
     int w = rc.right - rc.left;
-    int h = ScaleForDpi(40, dpi);
+    int h = ScaleForDpi(50, dpi);
     int x = 0;
     int y = 0;
 
@@ -4157,7 +4160,7 @@ static void ResizeHandlerSta(int w, int h)
     if (g_state.hwndCloseGuard)
     {
         UINT dpi = GetDpiForWindow(g_state.hwndRender);
-        int gh = ScaleForDpi(40, dpi);
+        int gh = ScaleForDpi(50, dpi);   // keep in sync with CreateCloseGuard
         SetWindowPos(g_state.hwndCloseGuard, HWND_TOP,
                      0, 0, w, gh,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
