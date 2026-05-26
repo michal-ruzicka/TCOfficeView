@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.2.2] – 2026-05-26
+
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1.0 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
 
 ### Added
 
@@ -635,6 +641,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[v2.2.2]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.1...v2.2.2
 [v2.2.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.0.0...v2.1.0
