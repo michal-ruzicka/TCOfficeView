@@ -326,9 +326,8 @@ Auto-fallback only kicks in when **all** of these hold:
 - The file is **not** marked with Mark-of-the-Web (downloaded from
   the internet, copied from a network share, or saved from an email
   attachment). MOTW-blocked files keep the dedicated fallback panel
-  with the **Unblock this file and retry the preview** button so
-  you can review the source URL and make the trust decision
-  explicitly. Loading them in full mode would bypass Office's
+  with the **Unblock this file** button so you can review the
+  source URL and make the trust decision explicitly. Loading them in full mode would bypass Office's
   Protected View (`ReadOnly=True` at the application level skips
   Protected View) and open the document editably — a security
   regression we do not want.

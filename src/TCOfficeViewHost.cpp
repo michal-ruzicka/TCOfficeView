@@ -1836,13 +1836,11 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
         }
 
         text += L"\r\n"
-                L"Clicking \"Unblock\" below will:\r\n"
-                L"  - Remove the download mark from this file (this file\r\n"
-                L"    only).\r\n"
-                L"  - Retry the preview.\r\n"
-                L"  - Permanently mark the file as trusted on this\r\n"
-                L"    computer; Office will open it without warning from\r\n"
-                L"    now on.\r\n"
+                L"Clicking \"Unblock this file\" below will:\r\n"
+                L"  1. Remove the download mark from this file marking\r\n"
+                L"     the file as trusted permanently on this computer;\r\n"
+                L"     Office will open it without warning from now on.\r\n"
+                L"  2. Retry the preview.\r\n"
                 L"\r\n"
                 L"This is equivalent to clicking \"Enable Editing\" in\r\n"
                 L"Office's yellow security bar.  If you are unsure, close\r\n"
@@ -2088,13 +2086,8 @@ static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
     // the only reliable way to colorise.
     if (showUnblock)
     {
-        wchar_t btnLabel[128] = {};
-        _snwprintf_s(btnLabel, _TRUNCATE,
-                     L"Unblock this file and retry the preview  (%s)",
-                     ZoneIdName(motw.zoneId));
-
         HWND hBtn = CreateWindowExW(
-            0, L"BUTTON", btnLabel,
+            0, L"BUTTON", L"Unblock this file",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
             0, 0, 0, 0,                              // sized by LayoutUnblockButtonSta
             g_state.hwndRender,

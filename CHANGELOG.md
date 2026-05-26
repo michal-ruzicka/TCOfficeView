@@ -68,8 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   i.e. Internet or Restricted zone), replaces the generic "handler
   failed" text with a tailored explanation: the security zone, the
   originating URL if present, and a plain-language description of what
-  Office's Protected View does and why.  An **Unblock this file and
-  retry the preview** button is shown at the bottom of the pane; one
+  Office's Protected View does and why.  An **Unblock this file**
+  button is shown at the bottom of the pane; one
   click strips the `Zone.Identifier` ADS (equivalent to PowerShell's
   `Unblock-File` or right-click → Properties → Unblock) and re-runs
   the LOAD in the same mode the user was in, so the document opens
