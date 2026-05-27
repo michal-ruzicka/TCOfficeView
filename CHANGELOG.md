@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Small UX improvements.
 
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming from v2.1.0 or earlier won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
+
 ### Changed
 
 - **Mark-of-the-Web handling delegated to Office in full mode only.**
@@ -44,8 +50,7 @@ Small UX improvements.
   Word / Excel / PowerPoint close button was 40 px tall, which on
   current Office builds left the bottom edge of the X glyph poking
   out below the guard — close enough for a user to hit it
-  accidentally.  The guard is now 54 px tall (DPI-scaled, applied in
-  both `CreateCloseGuard` and `ResizeHandlerSta`).
+  accidentally.  We now use a 50 px guard.
 
 ## [v2.2.2] – 2026-05-26
 

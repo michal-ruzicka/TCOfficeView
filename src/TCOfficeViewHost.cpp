@@ -2564,6 +2564,11 @@ static void ConfigurePowerPointForPreviewSta()
 
 static const wchar_t* kGuardClassName = L"TCOfficeViewCloseGuard";
 
+// Close-guard height in logical (96-DPI) pixels, applied at the call site
+// via ScaleForDpi.  The right value is a balance between covering the
+// close-button glyph fully and not overlapping the ribbon underneath.
+static constexpr int kCloseGuardHeight       = 50;
+
 static LRESULT CALLBACK GuardWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -2616,7 +2621,7 @@ static void CreateCloseGuard()
 
     UINT dpi = GetDpiForWindow(g_state.hwndRender);
     if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
-    // Cover the full width of the render pane and the top ~54 px where the
+    // Cover the full width of the render pane and the top ~50 px where the
     // Office ribbon / title bar lives. This blocks both the close button
     // and the context menu that appears on a right-click in the title area.
     // The exact height needs to be enough to fully hide the close button on
@@ -2625,7 +2630,7 @@ static void CreateCloseGuard()
     RECT rc;
     GetClientRect(g_state.hwndRender, &rc);
     int w = rc.right - rc.left;
-    int h = ScaleForDpi(50, dpi);
+    int h = ScaleForDpi(kCloseGuardHeight, dpi);
     int x = 0;
     int y = 0;
 
@@ -2663,22 +2668,27 @@ static void DestroyCloseGuard()
 // Reparent an Office app's main HWND into our render window and strip its
 // decorations so it looks like an embedded preview pane instead of a
 // top-level frame. Caller stores the HWND in the appropriate HostState slot.
-static bool EmbedOfficeWindowSta(HWND hwndApp)
+static bool EmbedOfficeWindowSta(HWND hwndApp, AppKind app)
 {
-    // Hide the window before any style/parent changes. Cross-process
-    // SetParent on a visible top-level window forces an expensive
-    // synchronous redraw and focus dance across process boundaries.
-    // PowerPoint in particular refuses Visible=False, so its frame is
-    // on-screen from the moment CoCreateInstance returns; hiding it
-    // here makes the reparent cheap and avoids the flash.
-    ShowWindow(hwndApp, SW_HIDE);
+    // Hide the window before any style/parent changes — but only for
+    // PowerPoint.  PowerPoint refuses `Application.Visible = False`, so its
+    // frame is on-screen from the moment `CoCreateInstance` returns;
+    // hiding it here makes the cross-process reparent cheap and avoids
+    // the flash.  Word and Excel are loaded with `Visible = False` before
+    // the document open, so their HWND is never on screen at this point
+    // and the SW_HIDE call is unnecessary.  For Excel it is actively
+    // harmful: its inner widgets (ribbon, XLDESK, status bar) lay out
+    // exactly once during the embed, and doing that on a hidden window
+    // leaves the ribbon collapsed for the rest of the preview.
+    if (app == AppKind::PowerPoint)
+        ShowWindow(hwndApp, SW_HIDE);
 
     LONG_PTR style   = GetWindowLongPtrW(hwndApp, GWL_STYLE);
     LONG_PTR exStyle = GetWindowLongPtrW(hwndApp, GWL_EXSTYLE);
 
     style &= ~(WS_OVERLAPPED | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
                WS_MAXIMIZEBOX | WS_SYSMENU | WS_DLGFRAME | WS_BORDER | WS_POPUP);
-    style |= WS_CHILD | WS_CLIPCHILDREN;
+    style |= WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
     exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE |
                  WS_EX_STATICEDGE   | WS_EX_APPWINDOW   | WS_EX_TOOLWINDOW);
     SetWindowLongPtrW(hwndApp, GWL_STYLE,   style);
@@ -2859,7 +2869,7 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
         CloseWordDocumentSta();
         return E_FAIL;
     }
-    if (!EmbedOfficeWindowSta(hwndWord))
+    if (!EmbedOfficeWindowSta(hwndWord, AppKind::Word))
     {
         CloseWordDocumentSta();
         return E_FAIL;
@@ -3032,7 +3042,7 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
         CloseExcelWorkbookSta();
         return E_FAIL;
     }
-    if (!EmbedOfficeWindowSta(hwndExcel))
+    if (!EmbedOfficeWindowSta(hwndExcel, AppKind::Excel))
     {
         CloseExcelWorkbookSta();
         return E_FAIL;
@@ -3213,7 +3223,7 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
         ClosePptPresentationSta();
         return E_FAIL;
     }
-    if (!EmbedOfficeWindowSta(hwndPpt))
+    if (!EmbedOfficeWindowSta(hwndPpt, AppKind::PowerPoint))
     {
         ClosePptPresentationSta();
         return E_FAIL;
@@ -3428,11 +3438,6 @@ static void UnloadHandlerSta()
         g_state.pHandlerUnk->Release();
         g_state.pHandlerUnk = nullptr;
     }
-    // After COM has released its references, sweep up any cross-process
-    // child window the surrogate left behind under hwndRender.  Must run
-    // AFTER the IPreviewHandler release so we don't yank a window that
-    // the handler is still drawing into.
-    PurgeOrphanRenderChildrenSta();
 }
 
 // Attempt a quick-mode preview-handler load.  Returns S_OK on real success
@@ -4160,7 +4165,7 @@ static void ResizeHandlerSta(int w, int h)
     if (g_state.hwndCloseGuard)
     {
         UINT dpi = GetDpiForWindow(g_state.hwndRender);
-        int gh = ScaleForDpi(50, dpi);   // keep in sync with CreateCloseGuard
+        int gh = ScaleForDpi(kCloseGuardHeight, dpi);
         SetWindowPos(g_state.hwndCloseGuard, HWND_TOP,
                      0, 0, w, gh,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
