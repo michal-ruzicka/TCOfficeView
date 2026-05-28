@@ -3,4 +3,4 @@ type=wlx
 file=TCOfficeView.wlx
 description=Preview every file that has a Windows Preview Handler registered — MS Office (DOCX, XLSX, PPTX, RTF, VSDX, MSG), PDF (Edge / Adobe), and anything else Explorer's Alt+P pane can show. The plugin hosts handlers out-of-process for stability and STA correctness, and silently declines files with no registered handler so Total Commander moves on to the next configured plugin or its built-in viewer.
 defaultdir=TCOfficeView
-version=2.3.0-devel
+version=2.3.0

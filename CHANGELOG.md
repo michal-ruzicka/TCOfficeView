@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.3.0] – 2026-05-28
 
 Full-mode preview for all Office apps is now fully interactive and much 
 more reliable. Rapid `Ctrl+Q`/`F3` browsing among Office files no longer 
@@ -732,6 +732,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[v2.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.2...v2.3.0
 [v2.2.2]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.1...v2.2.2
 [v2.2.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...v2.2.0
