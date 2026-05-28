@@ -651,7 +651,26 @@ struct HostState
     HWND                hwndWordApp     = nullptr;        // Word main window reparented into hwndRender
     IDispatch*          pExcelApp       = nullptr;
     IDispatch*          pExcelWb        = nullptr;
-    HWND                hwndExcelApp    = nullptr;        // Excel main window reparented into hwndRender
+    HWND                hwndExcelApp    = nullptr;        // Excel main window (overlaid on hwndRender — see excelOverlay)
+    // Excel full mode does NOT reparent Excel into hwndRender like Word/PPT.
+    // Instead Excel stays a borderless top-level window positioned exactly
+    // over the Lister pane (an "overlay"), so it can become the foreground
+    // window and accept interactive input (cell selection, sheet tabs, ribbon)
+    // — which a reparented child of a foreign process never can. When this is
+    // true, hwndExcelApp is that overlay window and kOverlayTrackTimerId is
+    // running. lastOverlayRect caches the pane's last screen rect so the
+    // tracking tick only calls SetWindowPos when something actually moved.
+    bool                excelOverlay    = false;
+    RECT                lastOverlayRect = {};
+    // Frozen snapshot of the Excel overlay shown in hwndRender while the
+    // overlay is parked off-screen (i.e. while TC is not the active window).
+    // Without it the pane would just go blank when the user switches to
+    // another application; the snapshot lets them keep reading the last
+    // Excel state. Captured (via PrintWindow) at each shown→park transition
+    // and painted by RenderWndProc's WM_PAINT. Freed on teardown / re-capture.
+    HBITMAP             overlaySnapshot = nullptr;
+    int                 snapshotW       = 0;
+    int                 snapshotH       = 0;
     // Mode-switch button (always-visible Win32 BUTTON in the top-right of
     // the render pane). It lets the user temporarily flip the current
     // preview between quick and full mode without changing the INI default.
@@ -659,6 +678,8 @@ struct HostState
     // re-opening this one starts over at the INI-configured mode.
     HWND                hwndModeButton  = nullptr;
     HFONT               hModeButtonFont = nullptr;
+    HWND                hwndLoading     = nullptr;
+    HFONT               hLoadingFont    = nullptr;
     std::wstring        currentFile;                    // last LOAD argument, for re-load on switch
     AppKind             currentFileApp  = AppKind::Other;
     Mode                currentLoadedMode = Mode::Quick;
@@ -668,6 +689,13 @@ struct HostState
     // (PeekMessage) so a second button click could otherwise recurse into
     // LoadFileWithModeSta and corrupt COM state.
     bool                loadingInProgress = false;
+    // Trailing-edge debounce for rapid file switching. When a LOAD arrives
+    // while one is already running (we get there reentrantly because the COM
+    // calls pump messages), LoadFileSta stores only the latest requested path
+    // here and the in-flight load picks it up when it finishes — so skimming a
+    // folder of Office files renders the file you land on instead of churning
+    // through every file in between. See LoadFileSta.
+    std::wstring        pendingLoadPath;
 
     // Invisible overlay window that sits in the top-right corner of the
     // render pane and swallows mouse clicks aimed at the Office app's own
@@ -744,6 +772,13 @@ static constexpr UINT_PTR kModeButtonZTimerId     = 1002;
 // scrolling — without SWP_NOZORDER, which moves them above the button
 // without generating WM_SIZE on hwndRender.
 static constexpr UINT_PTR kModeButtonKeepTopTimerId = 1003;
+// Periodic timer (~40 ms): tracks the Excel overlay window. Excel full mode
+// keeps Excel as a top-level window positioned over the Lister pane (rather
+// than reparented as a child) so it can become the foreground window and
+// process interactive input. This timer follows the pane as TC moves/resizes,
+// manages the overlay's z-order and visibility, and clips it to the visible
+// pane. Live only while an Excel overlay is active. See TrackExcelOverlaySta.
+static constexpr UINT_PTR kOverlayTrackTimerId      = 1004;
 
 // Mark-of-the-Web fallback panel: optional "Unblock & retry" button shown
 // alongside the read-only EDIT when the file the handler refused to
@@ -1231,8 +1266,9 @@ static DWORD WINAPI AvailableHandlersReportThread(LPVOID)
 
 static const wchar_t* kRenderClassName = L"TCOfficeViewHostRender";
 
-// Forward-declared so RenderWndProc's WM_TIMER handler can call it.
+// Forward-declared so RenderWndProc's WM_TIMER handler can call them.
 static void UpdateModeButtonSta();
+static void TrackExcelOverlaySta();
 
 static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1253,6 +1289,32 @@ static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 1;
             }
             return 1;                          // preview handler paints
+        }
+
+        case WM_PAINT:
+        {
+            // While the Excel overlay is parked off-screen (TC not active) the
+            // render pane is exposed; paint the frozen snapshot of the last
+            // Excel state so the user can still read it instead of seeing a
+            // blank pane. When the overlay is live it sits on top of this
+            // window, so this paint is harmless (covered). With no snapshot
+            // this is just a white background (the previous behaviour).
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            if (g_state.overlaySnapshot)
+            {
+                HDC memDC = CreateCompatibleDC(hdc);
+                HGDIOBJ oldBmp = SelectObject(memDC, g_state.overlaySnapshot);
+                BitBlt(hdc, 0, 0, g_state.snapshotW, g_state.snapshotH,
+                       memDC, 0, 0, SRCCOPY);
+                SelectObject(memDC, oldBmp);
+                DeleteDC(memDC);
+            }
+            EndPaint(hWnd, &ps);
+            return 0;
         }
 
         case WM_COMMAND:
@@ -1361,6 +1423,13 @@ static LRESULT CALLBACK RenderWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
                 {
                     UpdateModeButtonSta();
                 }
+            }
+            else if (wp == kOverlayTrackTimerId)
+            {
+                // Follow the Lister pane with the Excel overlay window (see
+                // TrackExcelOverlaySta). Runs only while an Excel overlay is
+                // active; the function is a cheap no-op otherwise.
+                TrackExcelOverlaySta();
             }
             break;
     }
@@ -1546,17 +1615,21 @@ static bool CreateRenderWindowSta(HINSTANCE hInst)
     return true;
 }
 
-// Forward declaration — defined later in the close-guard section.
+// Forward declarations — defined later in the file.
 static void DestroyCloseGuard();
+static void HideLoadingSta();
 
 static void DestroyRenderWindowSta()
 {
     DestroyCloseGuard();   // must go before hwndRender is destroyed
+    HideLoadingSta();
     if (g_state.hwndRender)
     {
-        // Cancel both timers before the window dies.
+        // Cancel our timers before the window dies. (DetachExcelWindowSta
+        // normally kills the overlay timer already; this is the safety net.)
         KillTimer(g_state.hwndRender, kModeButtonZTimerId);
         KillTimer(g_state.hwndRender, kModeButtonKeepTopTimerId);
+        KillTimer(g_state.hwndRender, kOverlayTrackTimerId);
         // Reparent back to HWND_MESSAGE before destroying — this severs the
         // cross-process link cleanly so TC's UI thread doesn't see a stale
         // child reference while we're tearing down.
@@ -1995,6 +2068,61 @@ static void HideFallbackSta()
     }
 }
 
+static void HideLoadingSta()
+{
+    if (g_state.hwndLoading)
+    {
+        DestroyWindow(g_state.hwndLoading);
+        g_state.hwndLoading = nullptr;
+    }
+    if (g_state.hLoadingFont)
+    {
+        DeleteObject(g_state.hLoadingFont);
+        g_state.hLoadingFont = nullptr;
+    }
+}
+
+static void ShowLoadingSta(LPCWSTR message)
+{
+    HideLoadingSta();
+    if (!g_state.hwndRender) return;
+
+    RECT rc = {};
+    GetClientRect(g_state.hwndRender, &rc);
+    const int paneW = rc.right - rc.left;
+    const int paneH = rc.bottom - rc.top;
+
+    HWND hEdit = CreateWindowExW(
+        0, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
+        ES_MULTILINE | ES_READONLY | ES_CENTER | ES_AUTOVSCROLL,
+        0, 0, paneW, paneH,
+        g_state.hwndRender, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (!hEdit) return;
+
+    UINT dpi = GetDpiForWindow(g_state.hwndRender);
+    if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
+    const int pixelHeight = -MulDiv(14, dpi, USER_DEFAULT_SCREEN_DPI);
+    g_state.hLoadingFont = CreateFontW(
+        pixelHeight, 0, 0, 0,
+        FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    if (g_state.hLoadingFont)
+        SendMessageW(hEdit, WM_SETFONT,
+                     reinterpret_cast<WPARAM>(g_state.hLoadingFont), TRUE);
+
+    SetWindowTextW(hEdit, message);
+    // Place above orphan windows but below the mode button.
+    SetWindowPos(hEdit, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    g_state.hwndLoading = hEdit;
+
+    RedrawWindow(g_state.hwndRender, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 // Position the MOTW unblock button at the bottom-centre of the render pane.
 // No-op if the button does not currently exist.  Centralised because both
 // ShowFallbackSta (initial placement) and ResizeHandlerSta (on every WM_SIZE)
@@ -2021,6 +2149,7 @@ static void LayoutUnblockButtonSta(int paneW, int paneH)
 static bool ShowFallbackSta(LPCWSTR path, HRESULT hr)
 {
     HideFallbackSta();
+    HideLoadingSta();
     if (!g_state.hwndRender) return false;
 
     RECT rc = {};
@@ -2344,6 +2473,10 @@ static void UnloadHandlerSta();
 static void UnloadWordFullSta(bool quitApp);
 static void UnloadExcelFullSta(bool quitApp);
 static void UnloadPptFullSta(bool quitApp);
+// Detaches any cross-process child the quick-mode preview handler left behind
+// in hwndRender. ShowExcelOverlaySta calls it so the demoted overlay never
+// reveals a stale quick-mode preview underneath. Defined far below.
+static void PurgeOrphanRenderChildrenSta();
 
 static void CloseWordDocumentSta()
 {
@@ -2458,34 +2591,32 @@ static void ConfigureWordForPreviewSta()
 
 // Excel preview tweak: set a fixed 100% zoom (per-window, does not modify
 // the workbook on disk since we opened ReadOnly). We deliberately don't
-// touch Application.WindowState — for a WS_CHILD Excel frame, both
-// xlNormal and xlMaximized produce visual glitches (the latter blanks
-// the ribbon entirely). Layout for the initial size is handled in
-// LoadExcelFullSta by setting Application.Width/Height *before*
-// Workbooks.Open; ResizeOfficeFullSta keeps them in sync on resize.
+// touch Application.WindowState — both xlNormal and xlMaximized produce
+// visual glitches on our frame (the latter blanks the ribbon entirely).
+// Layout for the initial size is handled in LoadExcelFullSta by setting
+// Application.Width/Height *before* Workbooks.Open.
 //
-// Two intrinsic limits we accepted as not solvable from outside Excel:
+// HISTORY: Excel full mode used to be a reparented WS_CHILD of hwndRender
+// like Word / PowerPoint, which had two intrinsic limits:
 //
-//   1. Excel does not relayout its child widgets (ribbon, XLDESK, sheet
-//      tabs, status bar) when the embedded Win32 frame is resized
-//      programmatically — neither SetWindowPos, Application.Width/Height,
-//      Application.WindowState nor ActiveWindow.WindowState reliably
-//      triggers it. The initial layout is correct thanks to pre-Open
-//      Width/Height in LoadExcelFullSta, but subsequent Lister resizes
-//      leave Excel's content anchored to the original area. Reopening
-//      the Lister forces a fresh initial layout at the new size.
+//   1. Interactive mouse input (cell selection, dragging, sheet-tab clicks,
+//      ribbon buttons) was unreliable. Excel gates much of that processing
+//      on being the foreground top-level window via internal
+//      GetForegroundWindow checks, and a reparented child of a foreign
+//      process never is. Faking foreground (SetForegroundWindow, activation
+//      hooks, synthetic WM_ACTIVATE/WM_NCACTIVATE) either stole focus from
+//      Total Commander or had no effect. **This is fixed by the overlay
+//      model** (see the block comment above ApplyExcelOverlayRegionSta):
+//      Excel now stays a genuine top-level window and becomes foreground on
+//      click, so input works.
 //
-//   2. Interactive mouse input (cell selection, dragging, sheet-tab
-//      clicks, most ribbon buttons) is unreliable. Excel gates much of
-//      that processing on being the foreground top-level window via
-//      internal GetForegroundWindow checks, and a reparented child of
-//      a foreign process never is. Faking foreground (SetForegroundWindow,
-//      activation hooks, synthetic WM_ACTIVATE/WM_NCACTIVATE) either
-//      stole focus from Total Commander or had no effect on Excel's
-//      internal checks. Word and PowerPoint do far less of this gating,
-//      which is why their reparented embeds feel interactive. Users
-//      who need interaction should stay in quick mode; full mode is
-//      best treated as a read-only visual preview of Excel.
+//   2. Excel did not relayout its child widgets (ribbon, XLDESK, sheet tabs,
+//      status bar) on a *programmatic* resize of the embedded child frame.
+//      The overlay frame is top-level and receives genuine WM_SIZE from the
+//      window manager when we SetWindowPos it, so this is expected to behave
+//      better — verify on real resizes and update this note accordingly.
+//      The pre-Open Width/Height in LoadExcelFullSta still gives the best
+//      initial layout regardless.
 static void ConfigureExcelForPreviewSta()
 {
     IDispatch* pWin = DispGetDispatchProperty(g_state.pExcelApp, L"ActiveWindow");
@@ -2742,9 +2873,485 @@ static void AssignOfficeProcessToJobSta(HWND hwndOfficeApp)
     CloseHandle(hProc);
 }
 
+// ---------------------------------------------------------------------------
+// Excel full-mode overlay.
+//
+// Word and PowerPoint are embedded by SetParent-ing their frame into
+// hwndRender (EmbedOfficeWindowSta). Excel is different: as a reparented
+// child of our foreign process it is never the foreground top-level window,
+// and Excel gates interactive input (cell selection, sheet-tab clicks, most
+// ribbon buttons) on internal GetForegroundWindow/active-window checks — so a
+// reparented Excel renders correctly but is effectively read-only. The cheap
+// foreground fakes (SetForegroundWindow, activation hooks, synthetic
+// WM_ACTIVATE) were tried and rejected (see the comment above
+// ConfigureExcelForPreviewSta).
+//
+// Instead we keep Excel a borderless TOP-LEVEL window and position it exactly
+// over the Lister pane — an "overlay". A genuine top-level window can become
+// the foreground window when the user clicks it, which satisfies Excel's
+// gating with no faking, so the preview is fully interactive. The cost is
+// that a top-level window does not clip to the pane or auto-hide behind TC's
+// dialogs/menus the way a child does; TrackExcelOverlaySta reconstructs that.
+// ---------------------------------------------------------------------------
+
+// Set the overlay's window region to (pane ∩ TC client area), minus a hole
+// for the mode-switch button. The hole lets the child mode button on
+// hwndRender (which sits behind the top-level overlay) show through and stay
+// clickable, so we need no separate floating button. `paneScreen` is the
+// overlay's current screen rect (its window origin), used to convert to the
+// overlay-local coordinates SetWindowRgn expects.
+static void ApplyExcelOverlayRegionSta(const RECT& paneScreen)
+{
+    const HWND hOverlay = g_state.hwndExcelApp;
+    if (!hOverlay) return;
+
+    // Visible area = pane clipped to TC's client rectangle, so a pane that
+    // extends past TC's visible client (scrolled / resized) doesn't paint
+    // Excel outside the panel.
+    RECT visible = paneScreen;
+    HWND tcRoot = GetAncestor(g_state.hwndPluginChild, GA_ROOT);
+    if (tcRoot)
+    {
+        RECT tcClient;
+        if (GetClientRect(tcRoot, &tcClient))
+        {
+            MapWindowPoints(tcRoot, nullptr,
+                            reinterpret_cast<POINT*>(&tcClient), 2);
+            RECT tmp;
+            if (IntersectRect(&tmp, &paneScreen, &tcClient))
+                visible = tmp;
+        }
+    }
+
+    const int ox = paneScreen.left;
+    const int oy = paneScreen.top;
+    RECT local = { visible.left - ox, visible.top - oy,
+                   visible.right - ox, visible.bottom - oy };
+    HRGN hrgn = CreateRectRgnIndirect(&local);
+
+    if (g_state.hwndModeButton && IsWindowVisible(g_state.hwndModeButton))
+    {
+        RECT btn;
+        GetWindowRect(g_state.hwndModeButton, &btn);     // screen coords
+        RECT holeLocal = { btn.left - ox, btn.top - oy,
+                           btn.right - ox, btn.bottom - oy };
+        HRGN hole = CreateRectRgnIndirect(&holeLocal);
+        CombineRgn(hrgn, hrgn, hole, RGN_DIFF);
+        DeleteObject(hole);
+    }
+
+    // SetWindowRgn takes ownership of hrgn on success (don't delete it
+    // ourselves); on failure it does not, so clean up to avoid a leak. A
+    // cross-process failure here would also hide the mode-switch button
+    // behind the overlay (the hole is what exposes it), so log it.
+    if (!SetWindowRgn(hOverlay, hrgn, TRUE))
+    {
+        HostLog(L"  ApplyExcelOverlayRegionSta: SetWindowRgn failed err=%lu",
+                GetLastError());
+        DeleteObject(hrgn);
+    }
+}
+
+// PW_RENDERFULLCONTENT (Windows 8.1+) makes PrintWindow capture DWM/GPU-
+// composited content — needed for a modern, hardware-accelerated app like
+// Excel. Define defensively in case an older SDK header lacks it.
+#ifndef PW_RENDERFULLCONTENT
+#define PW_RENDERFULLCONTENT 0x00000002
+#endif
+
+// Capture the Excel overlay's current visible content into g_state.overlaySnapshot
+// so the render pane can keep showing the last Excel state while the overlay is
+// parked off-screen (TC inactive). Called at the shown→park transition, while
+// Excel is still positioned over the pane and rendered. PrintWindow with
+// PW_RENDERFULLCONTENT works cross-process and for GPU-rendered windows; on
+// failure we keep no snapshot (pane falls back to blank), which is no worse
+// than before.
+static void CaptureExcelSnapshotSta()
+{
+    if (!g_state.hwndExcelApp) return;
+
+    RECT wr;
+    if (!GetWindowRect(g_state.hwndExcelApp, &wr)) return;
+    const int w = wr.right - wr.left;
+    const int h = wr.bottom - wr.top;
+    if (w <= 0 || h <= 0) return;
+
+    HDC screenDC = GetDC(nullptr);
+    if (!screenDC) return;
+    HDC     memDC = CreateCompatibleDC(screenDC);
+    HBITMAP bmp   = CreateCompatibleBitmap(screenDC, w, h);
+    BOOL    ok    = FALSE;
+    if (memDC && bmp)
+    {
+        HGDIOBJ oldBmp = SelectObject(memDC, bmp);
+        ok = PrintWindow(g_state.hwndExcelApp, memDC, PW_RENDERFULLCONTENT);
+        SelectObject(memDC, oldBmp);
+    }
+    if (memDC)    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+
+    if (ok)
+    {
+        if (g_state.overlaySnapshot) DeleteObject(g_state.overlaySnapshot);
+        g_state.overlaySnapshot = bmp;
+        g_state.snapshotW       = w;
+        g_state.snapshotH       = h;
+    }
+    else if (bmp)
+    {
+        DeleteObject(bmp);   // capture failed — leave any previous snapshot as-is
+        HostLog(L"  CaptureExcelSnapshotSta: PrintWindow failed err=%lu",
+                GetLastError());
+    }
+}
+
+// Per-tick maintenance of the Excel overlay: follow the pane's screen rect,
+// keep correct z-order, demote it behind everything when the pane is obscured
+// (TC dialog/menu, app switch, pane hidden), and keep the clip region in sync.
+// A cheap no-op when no overlay is active. Driven by kOverlayTrackTimerId
+// (~40 ms) and called directly on RESIZE and at install time.
+static void TrackExcelOverlaySta()
+{
+    if (!g_state.excelOverlay || !g_state.hwndExcelApp || !g_state.hwndRender)
+        return;
+
+    const HWND hOverlay = g_state.hwndExcelApp;
+
+    // Detect the user closing the preview from Excel's own title bar. Modern
+    // Excel draws its OWN caption (Close / Minimise / Maximise) inside the
+    // client area, so even though our overlay frame is borderless those
+    // buttons are present and work. Closing this way has two possible
+    // outcomes, and both must show the "closed" message instead of a blank
+    // pane:
+    //   - the window is destroyed                         → IsWindow == FALSE
+    //   - Excel keeps running (we still hold an Application COM ref) and just
+    //     HIDES its window once the last workbook closes  → IsWindow TRUE but
+    //                                                        not visible
+    // We tear down directly here rather than via UnloadExcelFullSta to avoid
+    // an RPC that could block the STA against a half-dead Excel. (Parking the
+    // overlay off-screen only ever MOVES it — it stays WS_VISIBLE — so a
+    // non-visible window here always means Excel hid it, never our own code.)
+    const bool windowGone   = !IsWindow(hOverlay);
+    const bool windowHidden = !windowGone && !IsWindowVisible(hOverlay);
+    if (windowGone || windowHidden)
+    {
+        HostLog(L"  TrackExcelOverlay: Excel closed by user (gone=%d hidden=%d)",
+                windowGone ? 1 : 0, windowHidden ? 1 : 0);
+
+        if (g_state.hwndRender)
+            KillTimer(g_state.hwndRender, kOverlayTrackTimerId);
+
+        g_state.excelOverlay = false;
+        SetRectEmpty(&g_state.lastOverlayRect);
+        g_state.hwndExcelApp = nullptr;
+
+        if (g_state.overlaySnapshot)
+        {
+            DeleteObject(g_state.overlaySnapshot);
+            g_state.overlaySnapshot = nullptr;
+            g_state.snapshotW = g_state.snapshotH = 0;
+        }
+
+        if (g_state.pExcelWb)
+        {
+            g_state.pExcelWb->Release();
+            g_state.pExcelWb = nullptr;
+        }
+        if (g_state.pExcelApp)
+        {
+            // If Excel is still alive (window only hidden) Quit it cleanly so
+            // we don't leave an orphaned hidden process; if the window is gone
+            // the process is already dying, so skip Quit (the RPC would just
+            // time out and block the STA thread for seconds).
+            if (windowHidden)
+                DispCall(g_state.pExcelApp, L"Quit", DISPATCH_METHOD,
+                         nullptr, 0, nullptr);
+            g_state.pExcelApp->Release();
+            g_state.pExcelApp = nullptr;
+        }
+
+        ShowLoadingSta(L"Full preview was closed.");
+        return;
+    }
+    const HWND tcRoot    = GetAncestor(g_state.hwndPluginChild, GA_ROOT);
+    const HWND fg        = GetForegroundWindow();
+    const HWND fgRoot    = fg ? GetAncestor(fg, GA_ROOT) : nullptr;
+    const DWORD overlayThread = GetWindowThreadProcessId(hOverlay, nullptr);
+    // True when the foreground window belongs to Excel's UI thread — i.e. the
+    // overlay itself OR one of Excel's own popups (context menu, dropdown,
+    // in-app dialog). Used both to keep the overlay up for those and to leave
+    // its z-order alone while they are showing (so a steady-state restack
+    // doesn't lift Excel over its own open menu).
+    const bool fgIsExcel =
+        fg && (GetWindowThreadProcessId(fg, nullptr) == overlayThread);
+
+    // --- Should the overlay be visible at all? -----------------------------
+    bool shouldShow = tcRoot != nullptr && IsWindowVisible(g_state.hwndRender);
+
+    RECT paneRect = {};
+    if (shouldShow)
+    {
+        GetWindowRect(g_state.hwndRender, &paneRect);
+        if (IsRectEmpty(&paneRect)) shouldShow = false;
+    }
+
+    if (shouldShow)
+    {
+        // Demote when the foreground belongs to neither TC's window tree, the
+        // overlay/Excel itself, nor our host's STA window. This covers an
+        // Alt-Tab away and — crucially — a TC modal dialog (a different
+        // top-level than tcRoot), which must be allowed to show over the pane.
+        //
+        // Excel's OWN popups (context menus, dropdowns, in-app dialogs) live on
+        // Excel's UI thread and become the foreground window when shown; we
+        // must keep the overlay up for those (fgIsExcel), or right-clicking a
+        // cell would demote Excel and the user would see the bare pane.
+        const bool fgOk = (fgRoot == tcRoot) ||
+                          (fg == hOverlay) || (fgRoot == hOverlay) || fgIsExcel ||
+                          (fg == g_state.hwndSta);
+        if (!fgOk) shouldShow = false;
+    }
+
+    if (shouldShow && tcRoot)
+    {
+        // Hide while TC has a menu open (menus don't change the foreground
+        // window, so the check above misses them).
+        GUITHREADINFO gti = {};
+        gti.cbSize = sizeof(gti);
+        const DWORD tcThread = GetWindowThreadProcessId(tcRoot, nullptr);
+        if (GetGUIThreadInfo(tcThread, &gti) &&
+            (gti.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE)))
+            shouldShow = false;
+    }
+
+    // Z-order: the overlay is ALWAYS `HWND_TOPMOST` (never changes band). Plain
+    // HWND_TOP was insufficient — a background process (our host) can't keep a
+    // window above the foreground Lister with HWND_TOP. To "hide" it when the
+    // foreground leaves TC/Excel we DON'T touch z-order or visibility at all; we
+    // simply PARK IT OFF-SCREEN (see the demote branch) and move it back over
+    // the pane to reveal. This avoids three traps that each produced a blank or
+    // collapsed preview: (1) `SW_HIDE`/`SW_SHOW` collapses Excel's ribbon on the
+    // way back; (2) `HWND_BOTTOM` occludes Excel, which then suspends presenting
+    // and won't repaint on a bare raise; (3) a topmost demote→raise round-trip
+    // from our background process didn't reliably re-raise an already-visible
+    // window above the foreground Lister. A pure move keeps the window topmost,
+    // never occluded by another window, and never hidden.
+    const bool tcTopmost = tcRoot &&
+        (GetWindowLongPtrW(tcRoot, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;   // logged only
+
+    // Diagnostic: log at install and on every show/demote transition. Low
+    // spam — only on the show-state change.
+    {
+        static HWND s_logFor    = nullptr;
+        static int  s_lastShown = -1;
+        const int showNow = shouldShow ? 1 : 0;
+        if (hOverlay != s_logFor || showNow != s_lastShown)
+        {
+            RECT ovr = {}; GetWindowRect(hOverlay, &ovr);
+            HostLog(L"  TrackExcelOverlay: show=%d fgIsExcel=%d tcTopmost=%d fg=0x%p "
+                    L"fgRoot=0x%p tcRoot=0x%p overlay=0x%p ovis=%d "
+                    L"ovr=(%ld,%ld,%ld,%ld) pane=(%ld,%ld,%ld,%ld) renderVis=%d",
+                    showNow, fgIsExcel ? 1 : 0, tcTopmost ? 1 : 0, fg, fgRoot, tcRoot,
+                    hOverlay, IsWindowVisible(hOverlay) ? 1 : 0,
+                    ovr.left, ovr.top, ovr.right, ovr.bottom,
+                    paneRect.left, paneRect.top, paneRect.right, paneRect.bottom,
+                    IsWindowVisible(g_state.hwndRender) ? 1 : 0);
+            s_logFor = hOverlay; s_lastShown = showNow;
+        }
+    }
+
+    if (!shouldShow)
+    {
+        // PARK OFF-SCREEN rather than SW_HIDE / HWND_BOTTOM (see the z-order
+        // comment above for why both of those failed). Move the window below
+        // the entire virtual screen, keeping its X (same monitor → same DPI,
+        // so no WM_DPICHANGED / relayout) and its size and topmost band. It is
+        // then invisible everywhere (no desktop bleed) without a hide, an
+        // occlusion, or a z-order change. Only act on the show→park transition
+        // (lastOverlayRect non-empty), and read its X before clearing it.
+        if (!IsRectEmpty(&g_state.lastOverlayRect))
+        {
+            // Snapshot the live Excel content BEFORE parking, so the pane can
+            // keep showing the last state instead of going blank.
+            CaptureExcelSnapshotSta();
+
+            const int parkX = g_state.lastOverlayRect.left;
+            const int parkY = GetSystemMetrics(SM_YVIRTUALSCREEN) +
+                              GetSystemMetrics(SM_CYVIRTUALSCREEN) + 64;
+            SetWindowPos(hOverlay, HWND_TOPMOST, parkX, parkY, 0, 0,
+                         SWP_NOSIZE | SWP_NOACTIVATE);
+            SetRectEmpty(&g_state.lastOverlayRect);   // marks "currently parked"
+
+            // Repaint the now-exposed pane with the fresh snapshot.
+            if (g_state.hwndRender)
+                InvalidateRect(g_state.hwndRender, nullptr, TRUE);
+        }
+        return;
+    }
+
+    // --- Move over the pane on first show / after a park / on pane move -----
+    // lastOverlayRect is empty whenever the overlay is currently parked, so a
+    // mismatch here also covers the parked→shown transition. The window is
+    // never hidden and never leaves the topmost band, so this is a pure move.
+    const bool wasParked = IsRectEmpty(&g_state.lastOverlayRect);
+    const bool moved     = !EqualRect(&paneRect, &g_state.lastOverlayRect);
+    if (moved)
+    {
+        g_state.lastOverlayRect = paneRect;
+        SetWindowPos(hOverlay, HWND_TOPMOST,
+                     paneRect.left, paneRect.top,
+                     paneRect.right - paneRect.left,
+                     paneRect.bottom - paneRect.top,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+        if (wasParked)
+        {
+            // Insurance: if Excel suspended presenting while parked, toggling
+            // Application.ScreenUpdating forces it to repaint the whole window
+            // (the same redraw that reopening the workbook triggers, which is
+            // why quick→full "fixed" a blanked overlay). ScreenUpdating is a
+            // transient runtime flag, not a persisted preference, so toggling
+            // it is safe.
+            if (g_state.pExcelApp)
+            {
+                DispPutBool(g_state.pExcelApp, L"ScreenUpdating", false);
+                DispPutBool(g_state.pExcelApp, L"ScreenUpdating", true);
+            }
+            // Diagnostic: confirm the actual post-reveal z-order so we can tell
+            // a z-order failure (something above us) from a render-pause.
+            RECT z = {}; GetWindowRect(hOverlay, &z);
+            HostLog(L"  overlay REVEAL: rect=(%ld,%ld,%ld,%ld) prevTop=0x%p "
+                    L"exTopmost=%d",
+                    z.left, z.top, z.right, z.bottom,
+                    GetWindow(hOverlay, GW_HWNDPREV),
+                    (GetWindowLongPtrW(hOverlay, GWL_EXSTYLE) & WS_EX_TOPMOST) ? 1 : 0);
+        }
+    }
+
+    // --- Keep the clip region in sync with the pane and the button --------
+    // Recompute only when something the region depends on changed: the pane
+    // rect, or the mode button's geometry / visibility. Caches are static
+    // (single overlay, single STA thread); a new overlay HWND forces a
+    // refresh via the s_rgnFor mismatch.
+    static HWND s_rgnFor   = nullptr;
+    static RECT s_rgnPane  = {};
+    static RECT s_rgnBtn   = {};
+    static bool s_rgnBtnVis = false;
+    RECT btnNow = {};
+    const bool btnVis = g_state.hwndModeButton &&
+                        IsWindowVisible(g_state.hwndModeButton);
+    if (btnVis) GetWindowRect(g_state.hwndModeButton, &btnNow);
+    if (hOverlay != s_rgnFor || !EqualRect(&paneRect, &s_rgnPane) ||
+        btnVis != s_rgnBtnVis || !EqualRect(&btnNow, &s_rgnBtn))
+    {
+        ApplyExcelOverlayRegionSta(paneRect);
+        s_rgnFor = hOverlay; s_rgnPane = paneRect;
+        s_rgnBtn = btnNow;   s_rgnBtnVis = btnVis;
+    }
+
+    // --- Steady-state z-order ---------------------------------------------
+    // We keep the overlay topmost; restack to the very top only when some other
+    // window has climbed above it (GW_HWNDPREV non-null). Re-applying every
+    // tick unconditionally would generate a cross-process WM_WINDOWPOSCHANGED
+    // storm (the lag commit 892e3a3 fixed for the mode button), so gate on the
+    // GW_HWNDPREV check. Skip when any Excel window is foreground (fgIsExcel):
+    // that includes Excel's own context menu / dropdown sitting above the
+    // overlay, and restacking then would lift Excel over its own open menu.
+    if (!fgIsExcel && GetWindow(hOverlay, GW_HWNDPREV) != nullptr)
+    {
+        SetWindowPos(hOverlay, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+// Explicitly remove a window's taskbar button. Adding WS_EX_TOOLWINDOW to an
+// ALREADY-VISIBLE window does NOT reliably drop its taskbar button — the shell
+// decides the button when the window is first shown (here, at
+// Application.Visible = true, before we can restyle it) and caches it. The
+// documented way to force the button off afterwards is either to hide/show the
+// window (which we cannot do — a SW_HIDE/SW_SHOW cycle makes Excel collapse its
+// ribbon) or to call ITaskbarList::DeleteTab, which removes it with no hide.
+static void RemoveFromTaskbarSta(HWND hwnd)
+{
+    ITaskbarList* pTbl = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr,
+                                   CLSCTX_INPROC_SERVER, IID_ITaskbarList,
+                                   reinterpret_cast<void**>(&pTbl))) && pTbl)
+    {
+        if (SUCCEEDED(pTbl->HrInit()))
+            pTbl->DeleteTab(hwnd);
+        pTbl->Release();
+    }
+}
+
+// Install Excel's window as the overlay (see the block comment above). Strips
+// the same chrome EmbedOfficeWindowSta removes but keeps the window top-level
+// (WS_POPUP, no SetParent) and adds WS_EX_TOOLWINDOW to keep it out of the
+// taskbar / Alt-Tab. No close button exists (no caption), so unlike the
+// reparent path there is no close-guard to create. Returns false only on a
+// null handle.
+static bool ShowExcelOverlaySta(HWND hwndExcel)
+{
+    if (!hwndExcel || !g_state.hwndRender) return false;
+
+    // Sweep up any cross-process child the just-unloaded quick-mode preview
+    // handler left behind in hwndRender. Otherwise, whenever the overlay is
+    // demoted (focus left TC/Excel), that orphan would show through the pane
+    // as a stale quick-mode preview.
+    PurgeOrphanRenderChildrenSta();
+
+    LONG_PTR style   = GetWindowLongPtrW(hwndExcel, GWL_STYLE);
+    LONG_PTR exStyle = GetWindowLongPtrW(hwndExcel, GWL_EXSTYLE);
+    // Clear the maximize/minimize STATE bits (WS_MAXIMIZE / WS_MINIMIZE), not
+    // just the box styles. Excel often opens maximized (it restores its last
+    // standalone window state); a maximized top-level window snaps back to the
+    // full monitor and ignores our SetWindowPos to the pane rect, so the
+    // overlay would never land on the pane and the user would see only the
+    // blank render window. Stripping the state bits + the SWP_FRAMECHANGED
+    // below makes the window freely positionable.
+    style &= ~(WS_OVERLAPPED | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+               WS_MAXIMIZEBOX | WS_SYSMENU | WS_DLGFRAME | WS_BORDER | WS_CHILD |
+               WS_MAXIMIZE | WS_MINIMIZE);
+    style |= WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN;
+    exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE |
+                 WS_EX_STATICEDGE    | WS_EX_APPWINDOW);
+    exStyle |= WS_EX_TOOLWINDOW;
+    SetWindowLongPtrW(hwndExcel, GWL_STYLE,   style);
+    SetWindowLongPtrW(hwndExcel, GWL_EXSTYLE, exStyle);
+
+    // Commit the style change (SWP_FRAMECHANGED) AND position the window over
+    // the pane in one call — topmost, no activation (TC keeps focus; the user's
+    // first click on the preview activates Excel). Doing the move here, rather
+    // than leaving it to the first tracker tick, guarantees the de-maximized
+    // window never appears at its old full-screen rect even for one frame.
+    RECT pane; GetWindowRect(g_state.hwndRender, &pane);
+    SetWindowPos(hwndExcel, HWND_TOPMOST,
+                 pane.left, pane.top, pane.right - pane.left, pane.bottom - pane.top,
+                 SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    g_state.hwndExcelApp   = hwndExcel;
+    g_state.excelOverlay   = true;
+    g_state.lastOverlayRect = pane;             // placed; the tracker maintains it
+
+    // The window briefly appeared in the taskbar at Application.Visible = true
+    // (before we could add WS_EX_TOOLWINDOW); the style change alone won't drop
+    // that button, so remove it explicitly. Especially important during rapid
+    // file switching, where the button would otherwise linger.
+    RemoveFromTaskbarSta(hwndExcel);
+
+    // Let the tracker compute the clip region and demote immediately if TC
+    // isn't actually foreground at this instant, then poll from here on.
+    TrackExcelOverlaySta();
+    SetTimer(g_state.hwndRender, kOverlayTrackTimerId, 40, nullptr);
+
+    HostLog(L"  ShowExcelOverlaySta: overlay installed hwnd=0x%p", hwndExcel);
+    return true;
+}
+
 static HRESULT LoadWordFullSta(LPCWSTR path)
 {
     HostLog(L"LoadWordFullSta: path='%s'", path);
+    HideLoadingSta();
 
     // Only one full-mode app can be embedded in the render pane at a time.
     // Tear down any leftover quick-mode handler and any other Office app
@@ -2906,6 +3513,43 @@ static void CloseExcelWorkbookSta()
 static void DetachExcelWindowSta()
 {
     if (!g_state.hwndExcelApp) return;
+
+    if (g_state.excelOverlay)
+    {
+        // Overlay teardown: stop tracking, drop the clip region, hide, and
+        // restore a normal top-level frame so the Quit path (or any leftover
+        // standalone window) is well-formed. The window was never a child of
+        // ours, so there is no SetParent(nullptr) and no close-guard.
+        if (g_state.hwndRender)
+            KillTimer(g_state.hwndRender, kOverlayTrackTimerId);
+        SetWindowRgn(g_state.hwndExcelApp, nullptr, TRUE);
+        ShowWindow(g_state.hwndExcelApp, SW_HIDE);
+        LONG_PTR style = GetWindowLongPtrW(g_state.hwndExcelApp, GWL_STYLE);
+        style &= ~WS_POPUP;
+        style |= WS_OVERLAPPEDWINDOW;
+        SetWindowLongPtrW(g_state.hwndExcelApp, GWL_STYLE, style);
+        LONG_PTR exStyle = GetWindowLongPtrW(g_state.hwndExcelApp, GWL_EXSTYLE);
+        exStyle &= ~WS_EX_TOOLWINDOW;
+        SetWindowLongPtrW(g_state.hwndExcelApp, GWL_EXSTYLE, exStyle);
+        SetWindowPos(g_state.hwndExcelApp, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+        g_state.excelOverlay = false;
+        SetRectEmpty(&g_state.lastOverlayRect);
+        g_state.hwndExcelApp = nullptr;
+        if (g_state.overlaySnapshot)
+        {
+            DeleteObject(g_state.overlaySnapshot);
+            g_state.overlaySnapshot = nullptr;
+            g_state.snapshotW = g_state.snapshotH = 0;
+        }
+        // Show "closed" text in the pane instead of leaving a blank white surface.
+        ShowLoadingSta(L"Preview was closed.");
+        return;
+    }
+
+    // Legacy reparent teardown (defensive — Excel now always uses the overlay
+    // path above; this mirrors the Word / PowerPoint detach for safety).
     ShowWindow(g_state.hwndExcelApp, SW_HIDE);
     DestroyCloseGuard();
     SetParent(g_state.hwndExcelApp, nullptr);
@@ -2921,11 +3565,17 @@ static void DetachExcelWindowSta()
 
 static void UnloadExcelFullSta(bool quitApp)
 {
+    // Remember whether the Excel window was still alive before we start
+    // tearing down. If the user closed it manually, we must not call Quit
+    // (that would RPC-timeout against the dead process and block the STA).
+    const bool wasAlive = g_state.hwndExcelApp && IsWindow(g_state.hwndExcelApp);
+
     CloseExcelWorkbookSta();
     DetachExcelWindowSta();
     if (quitApp && g_state.pExcelApp)
     {
-        DispCall(g_state.pExcelApp, L"Quit", DISPATCH_METHOD, nullptr, 0, nullptr);
+        if (wasAlive)
+            DispCall(g_state.pExcelApp, L"Quit", DISPATCH_METHOD, nullptr, 0, nullptr);
         g_state.pExcelApp->Release();
         g_state.pExcelApp = nullptr;
     }
@@ -2934,6 +3584,10 @@ static void UnloadExcelFullSta(bool quitApp)
 static HRESULT LoadExcelFullSta(LPCWSTR path)
 {
     HostLog(L"LoadExcelFullSta: path='%s'", path);
+
+    // Show loading text immediately so the user sees feedback while Excel
+    // cold-starts (which can take several seconds on first use).
+    ShowLoadingSta(L"Preview is loading…");
 
     // Only one full-mode app at a time; tear down the others.
     UnloadHandlerSta();
@@ -3042,15 +3696,20 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
         CloseExcelWorkbookSta();
         return E_FAIL;
     }
-    if (!EmbedOfficeWindowSta(hwndExcel, AppKind::Excel))
+    // Excel uses the top-level OVERLAY model, not reparenting, so it can
+    // become the foreground window and accept interactive input. (Word and
+    // PowerPoint keep the reparent path via EmbedOfficeWindowSta.)
+    if (!ShowExcelOverlaySta(hwndExcel))
     {
         CloseExcelWorkbookSta();
         return E_FAIL;
     }
-    g_state.hwndExcelApp = hwndExcel;
     AssignOfficeProcessToJobSta(hwndExcel);
 
     ConfigureExcelForPreviewSta();
+
+    // Excel is now visible — remove the loading text.
+    HideLoadingSta();
 
     HostLog(L"  LoadExcelFullSta SUCCESS");
     return S_OK;
@@ -3110,6 +3769,7 @@ static void UnloadPptFullSta(bool quitApp)
 static HRESULT LoadPowerPointFullSta(LPCWSTR path)
 {
     HostLog(L"LoadPowerPointFullSta: path='%s'", path);
+    HideLoadingSta();
 
     UnloadHandlerSta();
     UnloadWordFullSta(true);
@@ -3253,11 +3913,19 @@ static void ResizeOfficeFullSta(int w, int h)
     }
     if (g_state.hwndExcelApp)
     {
-        // Plain Win32 resize. Excel won't actually relayout its child
-        // widgets on this (see comment in ConfigureExcelForPreviewSta);
-        // we set the frame size for consistency with Word / PowerPoint
-        // even though the visible content stays at its load-time layout.
-        SetWindowPos(g_state.hwndExcelApp, nullptr, 0, 0, w, h, kFlags);
+        if (g_state.excelOverlay)
+        {
+            // Overlay model: Excel is a top-level window positioned over the
+            // pane, not a child sized by (w,h). hwndRender has already been
+            // resized by the caller, so let the tracker re-read the pane's
+            // screen rect and follow it immediately (don't wait for the next
+            // timer tick).
+            TrackExcelOverlaySta();
+        }
+        else
+        {
+            SetWindowPos(g_state.hwndExcelApp, nullptr, 0, 0, w, h, kFlags);
+        }
     }
     if (g_state.hwndPptApp)
     {
@@ -3393,6 +4061,7 @@ static void PurgeOrphanRenderChildrenSta()
         if (child != g_state.hwndModeButton    &&
             child != g_state.hwndUnblockButton &&
             child != g_state.hwndFallback      &&
+            child != g_state.hwndLoading       &&
             child != g_state.hwndCloseGuard    &&
             child != g_state.hwndWordApp       &&
             child != g_state.hwndExcelApp      &&
@@ -4129,11 +4798,47 @@ static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode,
 // path taken by the WM_HOST_LOAD pipe command (one per file shown in the
 // Lister), so switching files always resets to the configured default and
 // the user's button click does not carry over.
+//
+// Trailing-edge debounce for rapid file switching (Ctrl+Q + arrow keys over a
+// folder of Office files). In full mode each LOAD spins the real app — far
+// slower than the user can scroll — so loading every file skimmed past both
+// churns Excel and leaves the pane lagging behind. Instead:
+//   - if a LOAD arrives while one is already running (we are reentrant here
+//     because the COM calls pump messages), just remember the latest request
+//     and return; the in-flight load drains it below.
+//   - otherwise run the load, then keep loading whatever newer request landed
+//     while we were busy, until none remains.
+// The net effect: we render the file the user actually lands on (plus the
+// first one), and the final state is always a cleanly-finished load.
 static HRESULT LoadFileSta(LPCWSTR path)
 {
-    AppKind app = ClassifyByExtension(path);
-    Mode    cfg = SelectMode(app);              // may include the Switchable suffix
-    return LoadFileWithModeSta(path, app, BaseMode(cfg));
+    if (g_state.loadingInProgress)
+    {
+        g_state.pendingLoadPath = path;
+        HostLog(L"LoadFileSta: busy — queued latest '%s'", path);
+        return S_OK;
+    }
+
+    // A fresh (non-reentrant) request supersedes any stale queued path left
+    // over from, e.g., a LOAD that arrived during a mode switch.
+    g_state.pendingLoadPath.clear();
+
+    std::wstring cur = path;
+    HRESULT hr = S_OK;
+    for (;;)
+    {
+        AppKind app = ClassifyByExtension(cur.c_str());
+        Mode    cfg = SelectMode(app);          // may include the Switchable suffix
+        hr = LoadFileWithModeSta(cur.c_str(), app, BaseMode(cfg));
+
+        if (g_state.pendingLoadPath.empty())
+            break;                              // nothing newer arrived
+        cur = std::move(g_state.pendingLoadPath);
+        g_state.pendingLoadPath.clear();
+        if (cur == g_state.currentFile)
+            break;                              // already showing it
+    }
+    return hr;
 }
 
 static void ResizeHandlerSta(int w, int h)
@@ -4151,6 +4856,11 @@ static void ResizeHandlerSta(int w, int h)
     if (g_state.hwndFallback)
     {
         SetWindowPos(g_state.hwndFallback, nullptr, 0, 0, w, h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (g_state.hwndLoading)
+    {
+        SetWindowPos(g_state.hwndLoading, nullptr, 0, 0, w, h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     // The unblock button is positioned relative to the bottom edge; without

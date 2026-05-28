@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Small UX improvements.
+Interactive Excel full mode, plus small UX improvements.
 
 > **Upgrading from an earlier version?**  Total Commander keeps an
 > already-configured detect string when a plugin is replaced, so
@@ -15,9 +15,38 @@ Small UX improvements.
 > the new universal file-type support — see
 > [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
 
+### Added
+
+- **Excel full mode is now interactive.**  The full-mode Excel preview used to
+  render correctly but be effectively read-only — clicking cells, switching
+  sheet tabs and using the ribbon did not work.  It now behaves like a normal
+  (read-only) Excel window: cell selection, sheet-tab switching, scrolling and
+  the ribbon all work, and it tracks the Lister pane as you move or resize
+  Total Commander.  It also no longer stays anchored to its load-time size
+  after a resize (no need to close and reopen the Lister).  Achieving this
+  required re-architecting how Excel full mode is hosted — see the overlay
+  change under *Changed* below.  The **→ Quick** button still works as before;
+  Word and PowerPoint full mode are unchanged.
+
 ### Changed
 
-- **Mark-of-the-Web handling delegated to Office in full mode only.**
+- **Excel full mode re-architected from window embedding to a top-level
+  overlay.**  Word, Excel and PowerPoint full mode all used to *embed* the real
+  Office window — reparent it as a child of the Lister pane.  Excel full mode
+  has been changed to instead keep Excel a borderless **top-level window
+  floated over the pane**.  This is the only way to make it foreground-capable,
+  and therefore interactive (cell selection, sheet tabs, ribbon — see *Added*);
+  a reparented child of another process can never take the foreground, which is
+  why the embedded version was effectively read-only.  Behavioural consequences
+  worth knowing:
+    - The Excel preview is live only while Total Commander is the front window.
+      Switch to another application and the pane shows a **frozen snapshot** of
+      the last Excel state (still readable) until you switch back.
+    - Modern Excel draws its own title bar, so its **Close** button is present
+      even on our frameless window; closing the preview that way tears it down
+      and shows a "Preview was closed." message instead of a blank pane.
+  Word and PowerPoint full mode are unchanged (still embedded).
+- **Mark-of-the-Web handling delegated to Office in full mode.**
   TCOfficeView previously intercepted MOTW-blocked files before
   full-mode load and forced them through our own Unblock fallback
   panel — out of concern that `Documents.Open(ReadOnly=True)` might
@@ -41,13 +70,30 @@ Small UX improvements.
   authentication is independent of MOTW), and at that second LOAD
   the MOTW guard no longer fires so auto-fallback proceeds to full
   mode as usual.
-- **Small UI improvements.**
+- **Various small UI improvements.**
 
 ### Fixed
 
+- **Smoother rapid switching between Office files in full mode.**  Skimming a
+  folder with the arrow keys (e.g. in Quick View) used to start a full Office
+  load for every file flicked past, which is far slower than you can scroll —
+  so the preview lagged behind, an Excel button could linger in the taskbar,
+  and the **→ Quick** button could end up hidden behind the Excel window. LOAD
+  requests are now coalesced: while one load runs, only the most recent request
+  is remembered and loaded once the current one finishes, so the file you land
+  on is what gets rendered and the final state is always complete. The Excel
+  preview window is also removed from the taskbar reliably.
+- **Embedded Office no longer loads with a collapsed ribbon / full-screen
+  look.**  A window-hide optimisation added in v2.2.1 (to speed up
+  embedding and avoid a flash) was applied to all three Office apps, but
+  hiding the window mid-embed left Word/Excel laying out their ribbon and
+  toolbars at the wrong size.  The optimisation is now applied only to
+  PowerPoint, which is the only app whose window is actually on screen at
+  that point.  (Excel full mode additionally moved to the new top-level
+  overlay described above, which sidesteps the issue entirely.)
 - **Close-button guard now fully covers Office's title-bar X.**
   The invisible overlay that swallows clicks aimed at the embedded
-  Word / Excel / PowerPoint close button was 40 px tall, which on
+  Word / PowerPoint close button was 40 px tall, which on
   current Office builds left the bottom edge of the X glyph poking
   out below the guard — close enough for a user to hit it
   accidentally.  We now use a 50 px guard.

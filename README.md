@@ -225,24 +225,17 @@ What full mode does for each application:
   pane. Rulers are hidden and the preview is truly read-only (typing
   in the document is blocked).
 - **Excel** — opens the workbook read-only with the zoom set to
-  100%. Excel's initial layout fills the Lister pane on load.
-  **Known limits (full mode only — quick mode is unaffected):**
-    - Excel does not relayout when the Lister pane is later resized;
-      the content stays anchored to its initial area. Close the Lister
-      (Esc) and reopen it with F3/Ctrl+Q to get a fresh layout at the
-      new pane size.
-    - Interaction with the embedded Excel (selecting cells, dragging
-      a selection, clicking sheet tabs at the bottom, clicking ribbon
-      controls) is unreliable. Excel internally checks whether it is
-      the foreground top-level window before it processes much of its
-      mouse input — and once it is reparented as a child of another
-      process's window, those checks fail and clicks land in dead
-      areas. Word and PowerPoint do far less of this kind of checking,
-      which is why their full-mode embeds feel interactive even though
-      they use the same reparenting technique. If you need to interact
-      with the workbook, use **quick mode** (the default) — it does
-      not have this limitation. Full mode is best treated as a
-      visually faithful, mostly read-only viewer for Excel.
+  100%, filling the Lister pane on load and tracking the pane as you
+  move or resize the Lister. Unlike Word and PowerPoint, the Excel
+  preview is **interactive**: you can scroll, select cells, switch
+  sheet tabs and use the ribbon. (The workbook is opened read-only,
+  so it is a viewer — your changes are not saved.) Because Excel is
+  floated as its own window over the pane rather than embedded inside
+  it, the live preview is active only while Total Commander is the
+  front window; when you switch to another application the pane shows
+  a **frozen snapshot of the last Excel state** — still readable, just
+  not live — and goes back to the live, interactive preview when you
+  return to TC.
 - **PowerPoint** — opens the presentation read-only with the slide
   scaled to fit the Lister pane. The zoom re-fits automatically when
   you resize the pane. PowerPoint's main window appears on screen for
@@ -258,9 +251,6 @@ Full mode tradeoffs to be aware of:
   file types (`.docx` → `.xlsx`) quits the previous application and
   spins up the next one, so that switch pays the cold-start cost
   again.
-- **Only one application embedded at a time.** The Lister pane is a
-  single embed point — you cannot have a Word document and an Excel
-  workbook visible in the same Lister.
 - **Memory ~100–300 MB** per running Office instance.
 - **Requires a full Microsoft Office installation** of the relevant
   application — not Office Viewer, not LibreOffice.
