@@ -119,8 +119,8 @@ that up automatically the next time you use `F3` / `Ctrl+Q`.
 > Layout without page breaks, headers or footers; Excel shows a
 > simplified grid; PowerPoint shows static slides without transitions.
 > An opt-in **Full mode** that launches the real Word, Excel or
-> PowerPoint application and embeds its window into the Lister pane
-> is available; see [Application Render Mode](#application-render-mode)
+> PowerPoint application and displays it as an overlay over the Lister
+> pane is available; see [Application Render Mode](#application-render-mode)
 > below.
 
 > **MSG and VSDX caveat.** The New Outlook (the modern rewrite) has
@@ -195,10 +195,10 @@ memory-light (~30–80 MB), but the rendering pipeline is simplified
 PowerPoint slides without transitions).
 
 The **full** engine launches the real Word, Excel or PowerPoint
-application in the background, opens the file read-only, and embeds
-its main window into the Lister pane. It is slower (~2–4 s cold
-start, ~100–300 MB per instance) but renders documents exactly as the
-application would.
+application in the background, opens the file read-only, and floats
+its main window as a borderless overlay over the Lister pane. It is
+slower (~2–4 s cold start, ~100–300 MB per instance) but renders
+documents exactly as the full Office application would.
 
 All three applications can be configured independently:
 
@@ -217,6 +217,13 @@ re-opening the same one) returns to the configured default. The button
 is hidden for file types that have no full-mode equivalent (`.msg`,
 `.vsdx`) regardless of the setting.
 
+All three apps run in **full mode** as borderless overlay windows 
+positioned over the Lister pane — not embedded inside it. The overlay is 
+live while Total Commander is the front window; **when you switch to 
+another application** the pane shows a **frozen snapshot of the last 
+state** — still readable, just not live — and resumes as soon as you 
+return to TC.
+
 What full mode does for each application:
 
 - **Word** — shows the document in Print Layout (page boundaries,
@@ -225,29 +232,14 @@ What full mode does for each application:
   pane. Rulers are hidden and the preview is truly read-only (typing
   in the document is blocked).
 - **Excel** — opens the workbook read-only with the zoom set to
-  100%. Excel's initial layout fills the Lister pane on load.
-  **Known limits (full mode only — quick mode is unaffected):**
-    - Excel does not relayout when the Lister pane is later resized;
-      the content stays anchored to its initial area. Close the Lister
-      (Esc) and reopen it with F3/Ctrl+Q to get a fresh layout at the
-      new pane size.
-    - Interaction with the embedded Excel (selecting cells, dragging
-      a selection, clicking sheet tabs at the bottom, clicking ribbon
-      controls) is unreliable. Excel internally checks whether it is
-      the foreground top-level window before it processes much of its
-      mouse input — and once it is reparented as a child of another
-      process's window, those checks fail and clicks land in dead
-      areas. Word and PowerPoint do far less of this kind of checking,
-      which is why their full-mode embeds feel interactive even though
-      they use the same reparenting technique. If you need to interact
-      with the workbook, use **quick mode** (the default) — it does
-      not have this limitation. Full mode is best treated as a
-      visually faithful, mostly read-only viewer for Excel.
+  100%. The preview is interactive: you can scroll, select cells,
+  switch sheet tabs and use the ribbon. The workbook is opened
+  read-only, however — your changes are not saved.
 - **PowerPoint** — opens the presentation read-only with the slide
-  scaled to fit the Lister pane. The zoom re-fits automatically when
-  you resize the pane. PowerPoint's main window appears on screen for
-  a fraction of a second before being embedded into the Lister (a
-  brief visible flash); Word and Excel embed silently.
+  scaled to fit the Lister pane. The zoom re-fits automatically when 
+  you resize the pane. The preview is interactive: you can scroll, 
+  change view mode, change text in the slides. The presentation is 
+  opened read-only, however — your changes are not saved.
 
 Full mode tradeoffs to be aware of:
 
@@ -257,10 +249,11 @@ Full mode tradeoffs to be aware of:
   because the running Office instance is reused. Switching between
   file types (`.docx` → `.xlsx`) quits the previous application and
   spins up the next one, so that switch pays the cold-start cost
-  again.
-- **Only one application embedded at a time.** The Lister pane is a
-  single embed point — you cannot have a Word document and an Excel
-  workbook visible in the same Lister.
+  again. Browsing a folder with the arrow keys won't trigger a cold
+  start for every file — see [Full-Mode Load Delay](#full-mode-load-delay).
+- **Live only while Total Commander is the front window.** When you
+  switch to another application the pane shows a frozen snapshot of
+  the last state (still readable) and goes live again when you return.
 - **Memory ~100–300 MB** per running Office instance.
 - **Requires a full Microsoft Office installation** of the relevant
   application — not Office Viewer, not LibreOffice.
@@ -272,6 +265,45 @@ Full mode tradeoffs to be aware of:
   Excel and PowerPoint will start up exactly as you left them. The
   ribbon, for example, stays visible in the preview because hiding
   it would hijack your global Office settings.
+
+#### Full-Mode Load Delay
+
+When you navigate to a Word, Excel or PowerPoint file that will open
+in full mode, the plugin waits a **configurable dwell-time** before
+actually launching the Office application. If you move to a different
+file within that window, the timer resets and the previous file is
+never loaded. **Only the file you actually pause on starts the Office
+cold-start.**
+
+This prevents a wave of expensive Office launches when you browse a
+folder of Office documents with the arrow keys. The default is
+**1000 ms** (1 second); set it in `TCOfficeView.ini`:
+
+```ini
+[Mode]
+FullLoadDelayMs=1000   ; delay in ms before starting a full-mode Office load
+                       ; 0 = disabled (load immediately)
+```
+
+The delay works differently depending on the configured mode:
+
+- **`full` / `full-switchable`:** The Office launch is deferred from
+  the moment you navigate to the file. If you move away within the
+  dwell window, the launch is cancelled entirely.
+
+- **`quick-switchable` (default):** Quick mode runs **immediately**.
+  The delay kicks in only if the quick preview handler fails — which
+  typically happens for documents synced from a non-primary Microsoft
+  365 tenant (SharePoint cross-tenant). In that case the plugin shows
+  "Preview is loading…" and waits the dwell-time before starting the
+  real Office application. If you move to a different file within that
+  window, the Office launch is cancelled.
+
+  Files that succeed in quick mode are completely unaffected by this
+  setting — they load at full speed with no delay.
+
+The delay does **not** apply when you click the `→ Full` overlay
+button — that always loads immediately.
 
 #### Auto-Fallback for Multi-Tenant SharePoint Documents
 
@@ -325,13 +357,29 @@ Auto-fallback only kicks in when **all** of these hold:
 - The toggle for that application above is `true`.
 - The file is **not** marked with Mark-of-the-Web (downloaded from
   the internet, copied from a network share, or saved from an email
-  attachment). MOTW-blocked files keep the dedicated fallback panel
-  with the **Unblock this file and retry the preview** button so
-  you can review the source URL and make the trust decision
-  explicitly. Loading them in full mode would bypass Office's
-  Protected View (`ReadOnly=True` at the application level skips
-  Protected View) and open the document editably — a security
-  regression we do not want.
+  attachment). MOTW is by far the most common reason an otherwise-
+  healthy quick-mode handler refuses to render an Office file, and
+  the typical fix is a single click on the **Unblock this file**
+  button that the fallback panel offers. Once the file is unblocked
+  it usually renders fine in quick mode, which is simpler and
+  lighter than full mode — so we prefer to surface the Unblock
+  button rather than silently flip the document into the real
+  Office application.
+
+  Cross-tenant SharePoint documents that are ALSO marked with MOTW
+  are handled naturally by this design: after the user clicks
+  Unblock, the file is reloaded; quick still fails (the cross-
+  tenant authentication issue is independent of MOTW), and at that
+  point the MOTW guard no longer fires and auto-fallback proceeds
+  to full mode as usual. The Unblock click was technically a wasted
+  step in that case, but the user only pays it once per file.
+
+When the application is explicitly configured for `full` or
+`full-switchable`, the MOTW pre-check does not apply — the document
+flows directly into the real Office application, which displays its
+own Protected View (yellow "Enable Editing" banner, content visible
+in a read-only sandbox). MOTW handling there is left entirely to
+Office.
 
 Set the toggle to `false` for an application if you would rather see
 the explicit fallback panel (with the preview handler's HRESULT for

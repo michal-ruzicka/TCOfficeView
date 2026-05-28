@@ -5,6 +5,97 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.3.0] – 2026-05-28
+
+Full-mode preview for all Office apps is now fully interactive and much 
+more reliable. Rapid `Ctrl+Q`/`F3` browsing among Office files no longer 
+triggers a wave of cold-starts if full mode is used.
+
+> **Upgrading from an earlier version?**  Total Commander keeps an
+> already-configured detect string when a plugin is replaced, so
+> users coming **from v2.1.0 or earlier** won't automatically pick up
+> the new universal file-type support — see
+> [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
+
+### Added
+
+- **Word, Excel and PowerPoint full mode are now fully interactive and much
+  more reliable.**
+  Full-mode previews used to render almost correctly but especially in Excel 
+  clicking, scrolling and ribbon buttons did not work always correctly.
+  All three apps now behave like normal read-only Office windows.  Achieving 
+  this required re-architecting all three from window embedding to a 
+  top-level overlay — see *Changed* below.  The **→ Quick** button still 
+  works as before.
+- **Configurable dwell-time before starting an Office application
+  (`[Mode] FullLoadDelayMs`, default 1000 ms).**  The delay prevents
+  rapid arrow-key browsing from triggering a wave of expensive Office
+  cold-starts.  It works differently by mode:
+    - `full` / `full-switchable` — the Office launch is deferred from
+      initial navigation; if the user moves on within the dwell window
+      the launch is cancelled entirely and Office is never touched.
+    - `quick-switchable` (the default) — quick mode runs immediately
+      (no delay) and succeeds for ordinary Office files.  The delay
+      kicks in only when the quick handler fails and auto-fallback to
+      full mode would fire — which in practice means SharePoint
+      documents synced from a non-primary Microsoft 365 tenant.  For
+      those files "Preview is loading…" is shown during the dwell
+      window; the mode-switch button is hidden.  Moving to another file
+      within that window cancels the Office launch.  Files that load
+      fine in quick mode are completely unaffected.
+  Set to `0` to disable and load immediately (restores pre-dwell-time
+  behaviour).  The delay never applies to the `→ Full` mode-switch
+  button — that always loads immediately.
+
+### Changed
+
+- **All three Office apps re-architected from window embedding to a
+  top-level overlay.**  Word, Excel and PowerPoint full mode all used to
+  *embed* the real Office window — reparent it as a child of the Lister
+  pane.  All three are now kept as a borderless **top-level window floated
+  over the pane**.  This is the only way to make them foreground-capable,
+  and therefore interactive (especially very important for Excel windows); 
+  a reparented child of another process can never take the foreground, which 
+  is why the embedded versions were limited in some functionality.
+  
+  Behavioural consequences worth knowing:
+    - The preview is live only while Total Commander is the front window.
+      Switch to another application and the pane shows a **frozen snapshot**
+      of the last Office state (still readable) until you switch back.
+    - Modern Office apps draw their own title bar, so the **Close** button is
+      present even on a frameless window; closing the preview that way tears
+      it down and shows a "Full preview was closed." message instead of a
+      blank pane.
+    - The grey close-guard strip that used to cover the top of 
+      Word/Excel/PowerPoint full previews is gone — it was needed only to 
+      intercept the close button on embedded windows (resulting in closing 
+      lister [when `F3` was used] or even whole Total Commander window [when 
+      `Ctrl+Q` was used]), and is not needed in the overlay model.
+    - A "Preview is loading…" indicator appears for full preview mode.
+- **Mark-of-the-Web blocking enforced in full mode.**
+  Files opened via OLE Automation do not trigger Office's Protected View
+  pipeline — the application trusts its COM caller and opens the file
+  without the "Enable Editing" quarantine banner, bypassing the
+  security control MOTW is meant to enforce.  TCOfficeView now applies
+  its own MOTW check before launching any Office full-mode load: if
+  the file is MOTW-blocked (Internet or Restricted zone), the Unblock
+  fallback panel is shown instead of starting Office.  After clicking
+  **Unblock this file** the preview reloads in full mode as normal.
+  Quick and auto-fallback paths are unchanged.
+- **Unblock button made simpler** on the MOTW info page.
+
+### Fixed
+
+- **Rapid switching between Office files no longer triggers a load for
+  every file flicked past.**  Two complementary debounce mechanisms now
+  work together: a dwell-time timer (see `FullLoadDelayMs` above) prevents
+  the Office cold-start from starting at all for files you navigate through
+  quickly, and a message-queue trailing-edge filter skips queued LOAD
+  requests when a newer one is already waiting — so only the file you
+  actually land on gets rendered.  This also applies to the auto-fallback
+  path for SharePoint cross-tenant documents (which previously could trigger
+  Office cold-starts even on files the user had already left).
+
 ## [v2.2.2] – 2026-05-26
 
 > **Upgrading from an earlier version?**  Total Commander keeps an
@@ -68,8 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   i.e. Internet or Restricted zone), replaces the generic "handler
   failed" text with a tailored explanation: the security zone, the
   originating URL if present, and a plain-language description of what
-  Office's Protected View does and why.  An **Unblock this file and
-  retry the preview** button is shown at the bottom of the pane; one
+  Office's Protected View does and why.  An **Unblock this file**
+  button is shown at the bottom of the pane; one
   click strips the `Zone.Identifier` ADS (equivalent to PowerShell's
   `Unblock-File` or right-click → Properties → Unblock) and re-runs
   the LOAD in the same mode the user was in, so the document opens
@@ -641,6 +732,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[v2.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.2...v2.3.0
 [v2.2.2]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.1...v2.2.2
 [v2.2.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.1.0...v2.2.0
