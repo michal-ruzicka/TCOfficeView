@@ -119,8 +119,8 @@ that up automatically the next time you use `F3` / `Ctrl+Q`.
 > Layout without page breaks, headers or footers; Excel shows a
 > simplified grid; PowerPoint shows static slides without transitions.
 > An opt-in **Full mode** that launches the real Word, Excel or
-> PowerPoint application and embeds its window into the Lister pane
-> is available; see [Application Render Mode](#application-render-mode)
+> PowerPoint application and displays it as an overlay over the Lister
+> pane is available; see [Application Render Mode](#application-render-mode)
 > below.
 
 > **MSG and VSDX caveat.** The New Outlook (the modern rewrite) has
@@ -195,10 +195,10 @@ memory-light (~30–80 MB), but the rendering pipeline is simplified
 PowerPoint slides without transitions).
 
 The **full** engine launches the real Word, Excel or PowerPoint
-application in the background, opens the file read-only, and embeds
-its main window into the Lister pane. It is slower (~2–4 s cold
-start, ~100–300 MB per instance) but renders documents exactly as the
-application would.
+application in the background, opens the file read-only, and floats
+its main window as a borderless overlay over the Lister pane. It is
+slower (~2–4 s cold start, ~100–300 MB per instance) but renders
+documents exactly as the full Office application would.
 
 All three applications can be configured independently:
 
@@ -217,6 +217,13 @@ re-opening the same one) returns to the configured default. The button
 is hidden for file types that have no full-mode equivalent (`.msg`,
 `.vsdx`) regardless of the setting.
 
+All three apps run in **full mode** as borderless overlay windows 
+positioned over the Lister pane — not embedded inside it. The overlay is 
+live while Total Commander is the front window; **when you switch to 
+another application** the pane shows a **frozen snapshot of the last 
+state** — still readable, just not live — and resumes as soon as you 
+return to TC.
+
 What full mode does for each application:
 
 - **Word** — shows the document in Print Layout (page boundaries,
@@ -225,22 +232,14 @@ What full mode does for each application:
   pane. Rulers are hidden and the preview is truly read-only (typing
   in the document is blocked).
 - **Excel** — opens the workbook read-only with the zoom set to
-  100%, filling the Lister pane on load and tracking the pane as you
-  move or resize the Lister. Unlike Word and PowerPoint, the Excel
-  preview is **interactive**: you can scroll, select cells, switch
-  sheet tabs and use the ribbon. (The workbook is opened read-only,
-  so it is a viewer — your changes are not saved.) Because Excel is
-  floated as its own window over the pane rather than embedded inside
-  it, the live preview is active only while Total Commander is the
-  front window; when you switch to another application the pane shows
-  a **frozen snapshot of the last Excel state** — still readable, just
-  not live — and goes back to the live, interactive preview when you
-  return to TC.
+  100%. The preview is interactive: you can scroll, select cells,
+  switch sheet tabs and use the ribbon. The workbook is opened
+  read-only, however — your changes are not saved.
 - **PowerPoint** — opens the presentation read-only with the slide
-  scaled to fit the Lister pane. The zoom re-fits automatically when
-  you resize the pane. PowerPoint's main window appears on screen for
-  a fraction of a second before being embedded into the Lister (a
-  brief visible flash); Word and Excel embed silently.
+  scaled to fit the Lister pane. The zoom re-fits automatically when 
+  you resize the pane. The preview is interactive: you can scroll, 
+  change view mode, change text in the slides. The presentation is 
+  opened read-only, however — your changes are not saved.
 
 Full mode tradeoffs to be aware of:
 
@@ -250,7 +249,11 @@ Full mode tradeoffs to be aware of:
   because the running Office instance is reused. Switching between
   file types (`.docx` → `.xlsx`) quits the previous application and
   spins up the next one, so that switch pays the cold-start cost
-  again.
+  again. Browsing a folder with the arrow keys won't trigger a cold
+  start for every file — see [Full-Mode Load Delay](#full-mode-load-delay).
+- **Live only while Total Commander is the front window.** When you
+  switch to another application the pane shows a frozen snapshot of
+  the last state (still readable) and goes live again when you return.
 - **Memory ~100–300 MB** per running Office instance.
 - **Requires a full Microsoft Office installation** of the relevant
   application — not Office Viewer, not LibreOffice.
@@ -262,6 +265,32 @@ Full mode tradeoffs to be aware of:
   Excel and PowerPoint will start up exactly as you left them. The
   ribbon, for example, stays visible in the preview because hiding
   it would hijack your global Office settings.
+
+#### Full-Mode Load Delay
+
+When you navigate to a Word, Excel or PowerPoint file that will open
+in full mode, the plugin waits a **configurable dwell-time** before
+actually launching the Office application. If you move to a different
+file within that window, the timer resets and the previous file is
+never loaded. **Only the file you actually pause on starts the Office
+cold-start.**
+
+This prevents a wave of expensive Office launches when you browse a
+folder of Office documents with the arrow keys. The default is
+**1000 ms** (1 second); set it in `TCOfficeView.ini`:
+
+```ini
+[Mode]
+FullLoadDelayMs=1000   ; delay in ms before starting a full-mode Office load
+                       ; 0 = disabled (load immediately)
+```
+
+The delay applies to files configured for `full` or `full-switchable`,
+and also to `quick-switchable` files when auto-fallback is enabled
+(because those may silently retry in full mode if the quick handler
+fails). It does **not** apply when you click the `→ Full` overlay
+button — that always loads immediately because you explicitly requested
+the switch.
 
 #### Auto-Fallback for Multi-Tenant SharePoint Documents
 

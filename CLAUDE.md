@@ -162,6 +162,15 @@ Sections currently honoured:
   `quick-switchable` (default), `quick`, `full-switchable`, `full`.
   `BaseMode()` extracts the actual loader mode (Quick/Full);
   `IsSwitchable()` says whether to show the overlay button.
+- `[Mode] FullLoadDelayMs=` — dwell-time delay in milliseconds before
+  starting a full-mode OLE Automation load. Default `1000`. `0` disables
+  the delay entirely. Clamped to 0..10000. Read into `g_fullLoadDelayMs`.
+  When a LOAD arrives for a file whose configured mode is `full` or
+  `full-switchable`, `WM_HOST_LOAD` arms a one-shot timer
+  (`kFullLoadDeferTimerId` on `hwndSta`) instead of loading immediately.
+  Rapid navigation resets the timer; only the file the user actually stops
+  on triggers the Office COM launch. Does not apply to explicit mode-switch
+  button clicks (`WM_HOST_SWITCH_MODE`).
 - `[AutoFallback] Word=` / `Excel=` / `PowerPoint=` — per-app toggle
   (default `true`) for the quick→full auto-fallback path described
   below. Accepts true/false, yes/no, on/off, 1/0. Read into
@@ -228,11 +237,15 @@ Gated on five conditions, all of which must hold:
    SharePoint cross-tenant failure proceeds cleanly into auto-
    fallback.
 
-The explicit-full path (`mode == Mode::Full` above) deliberately
-does NOT have a corresponding MOTW pre-check. Office's Automation
-pipeline applies Protected View on its own for MOTW files (yellow
-"Enable Editing" banner, content visible in a read-only sandbox),
-which is the right outcome when the user has asked for full mode.
+The explicit-full path (`mode == Mode::Full` above) also checks MOTW
+before launching Office. OLE Automation (`Documents.Open` / etc.) does
+NOT engage Office's Protected View pipeline — the application trusts
+its COM caller and opens the file in full edit mode without any
+quarantine banner, bypassing the security boundary MOTW is meant to
+enforce. When `zoneId >= 3` the fallback panel (with the Unblock
+button) is shown instead of starting Office; `currentLoadedMode`
+remains `Mode::Full` so the Unblock handler reloads in the correct
+mode once the ADS is stripped.
 
 On auto-fallback success the code sets
 `g_state.currentLoadedMode = Mode::Full` so the mode-switch button
@@ -257,12 +270,10 @@ failure on the reload should still benefit from auto-fallback.
 
 The Unblock button itself is added by `ShowFallbackSta` whenever
 the fallback panel is shown for a MOTW-blocked file
-(`ReadFileZoneInfo(path).zoneId >= 3`). That naturally restricts
-its visibility to the quick-mode failure path — the only way the
-fallback panel is displayed now that the full-mode pre-check is
-gone. If the user is configured for full mode (or auto-fallback
-landed them there) Office shows its own Protected View UI and the
-Unblock button never appears.
+(`ReadFileZoneInfo(path).zoneId >= 3`). This covers both the quick-
+mode failure path and the full-mode MOTW pre-check: in both cases
+`ShowFallbackSta(origPath, hr)` is called and `showUnblock` becomes
+`true` inside it.
 
 The generic-failure branch of `BuildFallbackText` (the non-MOTW,
 non-`REGDB_E_CLASSNOTREG` path) calls `ClassifyByExtension(path)`
@@ -342,16 +353,16 @@ Per-app COM details:
 | PowerPoint | `PowerPoint.Application`| `Presentations` | `Open(FileName, ReadOnly, Untitled, WithWindow)`      | `PPTFrameClass`|
 
 `Application.Visible` can be `False` for Word and Excel (the window
-materialises only after we set it back to `True` for the reparent/overlay
-step). **PowerPoint rejects `Visible = False`**, so its main window is always
-on screen between `Presentations.Open` and our `SetParent` — accept the
-brief flash.
+materialises only after we set it back to `True` before the overlay step).
+**PowerPoint rejects `Visible = False`**, so its main window is always
+on screen between `Presentations.Open` and the overlay installation — the
+"Preview is loading…" indicator in `hwndRender` covers the pane during that
+window.
 
-**Word and PowerPoint are embedded by reparenting** (`SetParent` into
-`hwndRender`); **Excel uses a top-level overlay instead** — see "Excel
-full-mode overlay" below. The COM lifecycle (Open / Visible / HWND lookup /
-Close / Quit / Job Object) is identical across all three; only the
-window-hosting step differs for Excel.
+**All three apps use the overlay model** — `ShowOfficeOverlaySta` — see
+"Full-mode overlay" below. The COM lifecycle (Open / Visible / HWND lookup /
+Close / Quit / Job Object) is identical across all three; only minor per-app
+differences remain (see the per-app tables below).
 
 `Document.Close` arguments differ:
 - Word: `Close(SaveChanges = wdDoNotSaveChanges = 0)` (Long enum)
@@ -371,7 +382,7 @@ the host dies abruptly (plugin-side `TerminateProcess` after a
 hanging Quit, Windows shutdown, host crash). To make the lifetime
 deterministic, the host creates a Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in `wmain` and assigns each
-Office process to it right after `EmbedOfficeWindowSta` (via the
+Office process to it right after `ShowOfficeOverlaySta` (via the
 HWND → `GetWindowThreadProcessId` → `OpenProcess` →
 `AssignProcessToJobObject` sequence). When the host process exits
 through *any* path, the kernel closes the Job handle and the
@@ -384,12 +395,12 @@ close it on process exit means the clean-quit path gets a chance
 to finish first and the Job is only the safety net for unclean
 exits.
 
-### Embedding the app window
+### Installing the app window overlay
 
 For Word and Excel the main HWND does not materialise until
 `Application.Visible = True`. For PowerPoint the HWND exists from
-`CoCreateInstance` since `Visible = False` is not allowed. The embedding
-sequence (parameterised on the app) is:
+`CoCreateInstance` since `Visible = False` is not allowed. The overlay
+installation sequence (parameterised on the app) is:
 
 1. `CoCreateInstance(*.Application, IID_IDispatch)` — process is up.
 2. Suppress dialogs: Word/PowerPoint use a `DisplayAlerts` enum (Word
@@ -410,18 +421,15 @@ sequence (parameterised on the app) is:
    `PPTFrameClass`), filtered by a window-title substring (the document
    filename) to disambiguate from any pre-existing instance the user
    may have running.
-7. Host the window:
-   - **Word / PowerPoint** — `EmbedOfficeWindowSta`: `SetParent` into
-     `hwndRender`, strip `WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_BORDER|
-     WS_POPUP|...`, add `WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN`, `SetWindowPos`
-     with `SWP_FRAMECHANGED`. (`EmbedOfficeWindowSta` takes an `AppKind`; the
-     pre-reparent `ShowWindow(SW_HIDE)` runs only for PowerPoint, which alone
-     has its frame on-screen before this point — see the function comment.)
-   - **Excel** — `ShowExcelOverlaySta`: strip the same chrome but keep the
-     window **top-level** (`WS_POPUP`, no `SetParent`) and overlay it on the
-     pane — see "Excel full-mode overlay" below.
-8. Store the HWND into the per-app slot (`hwndWordApp` /
-   `hwndExcelApp` / `hwndPptApp`).
+7. **All three apps** — `ShowOfficeOverlaySta(hwnd, AppKind)`: strip
+   `WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_BORDER|WS_CHILD|
+   WS_MAXIMIZE|WS_MINIMIZE|...`, add `WS_POPUP|WS_EX_TOOLWINDOW`,
+   then `SetWindowPos(HWND_TOPMOST, paneRect, SWP_FRAMECHANGED|
+   SWP_NOACTIVATE|SWP_SHOWWINDOW)`. Updates the per-app overlay flag
+   (`wordOverlay` / `excelOverlay` / `pptOverlay`) and stores the HWND
+   into the slot (`hwndWordApp` / `hwndExcelApp` / `hwndPptApp`).
+8. Start `kOverlayTrackTimerId` (~40 ms) to keep the overlay positioned
+   over the pane. See "Full-mode overlay" below.
 
 ### Per-document preview tweaks (Word only)
 
@@ -443,8 +451,8 @@ auto-refit-on-resize equivalent of Word's `wdPageFitBestFit`.
 To make the initial layout match the Lister pane we set
 `Application.Width`/`Height` (in points) just before `Workbooks.Open` —
 Excel's frame size at workbook-open time is what its layout engine commits
-to. See "Excel full-mode overlay" below for the rest of Excel's window
-handling and the relayout-on-resize caveat.
+to. See "Full-mode overlay" below for the rest of Excel's window handling
+and the relayout-on-resize caveat.
 
 PowerPoint: `ConfigurePowerPointForPreviewSta` sets
 `ActiveWindow.View.ZoomToFit = msoTrue`. Unlike Excel, this *is*
@@ -457,107 +465,98 @@ them here would silently rewrite the user's standalone-Word
 preferences. Only window-, view- and document-scoped properties are in
 scope.
 
-### Excel full-mode overlay
+### Full-mode overlay
 
-Excel full mode does **not** reparent Excel into `hwndRender` like Word and
-PowerPoint. As a reparented `WS_CHILD` of our (foreign) process, Excel's frame
-is never the foreground top-level window, and Excel gates most interactive
-input (cell selection, sheet-tab clicks, ribbon buttons) on internal
-`GetForegroundWindow`/active-window checks — so a reparented Excel renders
-correctly but is effectively read-only. Faking foreground
-(`SetForegroundWindow`, activation hooks, synthetic `WM_ACTIVATE`) either stole
-focus from TC or had no effect on Excel's checks.
+All three apps (Word, Excel, PowerPoint) use `ShowOfficeOverlaySta` to keep
+the Office window as a **borderless top-level window** (`WS_POPUP`,
+`WS_EX_TOOLWINDOW`) positioned exactly over the Lister pane rather than being
+reparented as a `WS_CHILD` of our process.
 
-Instead `ShowExcelOverlaySta` keeps Excel a **borderless top-level window**
-(`WS_POPUP`, `WS_EX_TOOLWINDOW`, no `SetParent`) positioned exactly over the
-Lister pane. A genuine top-level window can become the foreground window when
-the user clicks it, which satisfies Excel's gating with no faking — so the
-preview is fully interactive. Word/PowerPoint stay on the proven reparent path;
-Excel is the only overlay.
+**Why overlay, not reparent?** A reparented child of a foreign process is never
+the foreground top-level window. All Office apps gate interactive input
+(cursor movement, cell selection, ribbon buttons, slide editing) on internal
+`GetForegroundWindow`/active-window checks. A genuine top-level window can
+become the foreground window when the user clicks it, satisfying those checks
+with no faking. The old embedded approach also required a "close-guard" strip —
+a child window covering the title bar area to swallow clicks on the × button —
+which is unnecessary with a borderless overlay frame.
 
-`ShowExcelOverlaySta` must also strip the **`WS_MAXIMIZE` / `WS_MINIMIZE` state
-bits** (not just the maximize/minimize *box* styles). Excel frequently opens
-maximized — it restores its last standalone window state — and a maximized
-top-level window snaps to the full monitor and **ignores `SetWindowPos` to the
-pane rect**, so the overlay would never land on the pane and the user would see
-only the blank render window. Stripping the state bits makes it freely
-positionable. (The reparent path doesn't need this: `WS_CHILD` makes the
-maximize state moot.)
+`ShowOfficeOverlaySta` must also strip the **`WS_MAXIMIZE` / `WS_MINIMIZE`
+state bits** (not just the box styles). Office apps frequently open maximized
+(they restore their last standalone window state), and a maximized top-level
+window snaps to the full monitor and **ignores `SetWindowPos` to the pane
+rect**. Stripping the state bits + `SWP_FRAMECHANGED` makes the window freely
+positionable.
 
-`TrackExcelOverlaySta` (periodic `kOverlayTrackTimerId`, ~40 ms, live only
-while `g_state.excelOverlay`) reconstructs the things a child got for free:
+`TrackOfficeOverlaySta` (periodic `kOverlayTrackTimerId`, ~40 ms, live only
+while any overlay is active) reconstructs what a child window got for free:
 
 - **Follow the pane.** `GetWindowRect(hwndRender)` is the pane's screen rect;
   reposition the overlay when it changes (cached in `g_state.lastOverlayRect`).
   TC window *moves* send no `RESIZE`, hence the poll. `ResizeOfficeFullSta`
   also calls the tracker directly for snappy resizes.
 - **Visibility / "hide when covered".** Show the overlay when the foreground
-  window's root is TC's window (`GetAncestor(hwndPluginChild, GA_ROOT)` —
-  resolves to the Lister window in F3, TC main in Quick View) **or** the
-  foreground is on Excel's own UI thread (`fgIsExcel` — covers Excel's context
-  menus / dropdowns / in-app dialogs, which become foreground when shown and
-  must NOT demote the preview). Otherwise demote: Alt-Tab away, a TC modal
-  dialog (a different top-level than `tcRoot`, so it must show over the pane),
-  the pane being hidden, or TC's GUI thread being in menu mode
-  (`GetGUIThreadInfo` / `GUI_INMENUMODE`).
+  window's root is TC's window (`GetAncestor(hwndPluginChild, GA_ROOT)`) **or**
+  the foreground is on the Office app's own UI thread (`fgIsApp` — covers
+  context menus / dropdowns / in-app dialogs, which become foreground when shown
+  and must NOT demote the preview). Otherwise demote: Alt-Tab away, a TC modal
+  dialog, the pane hidden, or TC in menu mode (`GetGUIThreadInfo` /
+  `GUI_INMENUMODE`).
 - **Z-order — always `HWND_TOPMOST`; "hide" by PARKING OFF-SCREEN.** The
   overlay never changes z-order band or visibility. `HWND_TOP` was insufficient
-  (a background process can't keep a window above the foreground Lister with it)
-  so it is always `HWND_TOPMOST`. To hide it when the foreground leaves TC/Excel
-  we **move it below the virtual screen** (same X → same monitor/DPI, same size,
-  same topmost band) and move it back over the pane to reveal. This deliberately
-  avoids three traps, each of which produced a blank or ribbon-collapsed
-  preview: (1) `SW_HIDE`/`SW_SHOW` collapses Excel's ribbon on the way back
-  (the "lay out once" quirk); (2) `HWND_BOTTOM` *occludes* Excel, which then
-  suspends GPU presenting and won't repaint on a bare raise; (3) a topmost
+  (a background process can't reliably keep a window above the foreground Lister
+  with it). To hide the overlay we **move it below the virtual screen** (same X
+  → same monitor/DPI, same size, same topmost band) and move it back to reveal.
+  This avoids three traps, each of which produced a blank or ribbon-collapsed
+  preview: (1) `SW_HIDE`/`SW_SHOW` collapses the ribbon on the way back;
+  (2) `HWND_BOTTOM` occludes the app, suspending GPU presenting; (3) a topmost
   demote→raise round-trip from our background process did not reliably re-raise
-  an already-visible window above the foreground Lister (it stayed behind → bare
-  pane). A pure off-screen move sidesteps all three and also avoids desktop
-  bleed. `lastOverlayRect` empty is the "currently parked" flag. Steady-state
-  restack only when something climbed above it (`GetWindow(GW_HWNDPREV)`
-  non-null) **and** `!fgIsExcel` (don't lift Excel over its own open menu) — the
-  cheap-tick discipline `kModeButtonKeepTopTimerId` uses to avoid the
-  cross-process `WM_WINDOWPOSCHANGED` storm (commit 892e3a3).
-- **ScreenUpdating toggle on reveal (insurance).** If Excel still suspended
-  presenting while parked, `TrackExcelOverlaySta` toggles
-  `Application.ScreenUpdating` false→true on the parked→shown transition, which
-  forces Excel to repaint its whole window — the same redraw that reopening the
-  workbook triggers (which is why quick→full used to "fix" a blanked overlay).
-  `ScreenUpdating` is a transient runtime flag, not a persisted preference.
+  above the foreground Lister. `lastOverlayRect` empty is the "currently parked"
+  flag. Steady-state restack only when something climbed above it
+  (`GetWindow(GW_HWNDPREV)` non-null) **and** `!fgIsApp`.
+- **Snapshot on park.** `CaptureOverlaySnapshotSta` uses `PrintWindow` with
+  `PW_RENDERFULLCONTENT` to capture the Office content just before parking.
+  `RenderWndProc`'s `WM_PAINT` blits this bitmap so the user sees the last
+  preview state instead of a blank pane while TC is in the background.
+- **ScreenUpdating toggle on reveal (Excel only, insurance).** If Excel
+  suspended GPU presenting while parked, `TrackOfficeOverlaySta` toggles
+  `Application.ScreenUpdating` false→true on the park→reveal transition, forcing
+  a full repaint. `ScreenUpdating` is a transient runtime flag.
 - **Taskbar button removal.** The window briefly appears in the taskbar at
-  `Application.Visible = true`, before we can add `WS_EX_TOOLWINDOW`. Adding
-  that style to an already-visible window does NOT drop the existing taskbar
-  button (the shell fixes it at show time), and we can't `SW_HIDE`/`SW_SHOW` to
-  force the update (ribbon collapse). `ShowExcelOverlaySta` therefore calls
-  `RemoveFromTaskbarSta` → `ITaskbarList::DeleteTab(hwnd)`, which removes the
-  button explicitly with no hide. Especially important during rapid file
-  switching, where the button would otherwise linger.
-- **Clip + button hole.** `ApplyExcelOverlayRegionSta` sets the overlay's
-  `SetWindowRgn` to (pane ∩ TC client rect) **minus the mode-switch button's
-  rectangle**. The hole makes that corner of the overlay transparent and
-  click-through, so the existing child `hwndModeButton` on `hwndRender` (behind
-  the overlay) shows through and stays clickable — no second floating window.
-  `SetWindowRgn` is cross-process (same family as the `SetParent`/`SetWindowPos`
-  calls already used on this HWND); a failure is logged because it would hide
-  the button.
+  `Application.Visible = true`, before `WS_EX_TOOLWINDOW` is added. The style
+  change alone does not remove an existing button; `ShowOfficeOverlaySta` calls
+  `RemoveFromTaskbarSta` → `ITaskbarList::DeleteTab(hwnd)` explicitly.
+- **Clip + button hole.** `ApplyOverlayRegionSta` sets `SetWindowRgn` to
+  (pane ∩ TC client rect) **minus the mode-switch button's rectangle**, making
+  that corner transparent and click-through so `hwndModeButton` (behind the
+  overlay) remains visible and clickable.
 
-Teardown (`DetachExcelWindowSta`, branched on `excelOverlay`): kill the timer,
-clear the region, hide, restore `WS_OVERLAPPEDWINDOW` (no `SetParent(nullptr)`
-— it was never a child). No close-guard is created in overlay mode (a
-borderless window has no close button).
+**User-close detection.** Modern Office apps draw their own Close/Minimise/
+Maximise buttons inside the client area (not as Win32 non-client chrome), so
+those buttons are present and functional even on a borderless WS_POPUP frame.
+`TrackOfficeOverlaySta` detects `!IsWindow(hOverlay)` (window destroyed) and
+`!IsWindowVisible(hOverlay)` (app hid it after last document closed) and shows
+"Full preview was closed." in the pane. The teardown for each app is in the
+tracker's branch (not via `UnloadXxxFullSta`) to avoid an RPC that could block
+the STA against a half-dead Office process.
+
+Teardown (`DetachWordWindowSta` / `DetachExcelWindowSta` / `DetachPptWindowSta`):
+kill the timer, clear `SetWindowRgn`, `SW_HIDE`, restore `WS_OVERLAPPEDWINDOW`,
+no `SetParent(nullptr)` — the window was never a child. Called by the
+`UnloadXxxFullSta` functions during normal file switching; the tracker handles
+user-initiated close independently.
 
 Known limitations / caveats:
 
-- Editing focus moves the system foreground to Excel, so TC's title bar shows
-  inactive while interacting — expected, same as having Excel open.
-- `Alt+F4` / `Ctrl+W` while the overlay is focused goes to Excel and may close
-  the workbook/Excel (would need a low-level keyboard hook to block).
+- Editing focus moves the system foreground to the Office app, so TC's title bar
+  shows inactive while interacting — expected, same as having Office open.
+- `Alt+F4` / `Ctrl+W` while the overlay is focused goes to the Office app and
+  may close the document (would need a low-level keyboard hook to block).
 - Arbitrary occlusion by an unrelated always-on-top window is not pixel-clipped;
   only the foreground/dialog/menu cases park the overlay off-screen.
-- The old relayout-on-resize limitation (inner widgets laid out once at
-  open-time size) may be improved now that Excel is a top-level window getting
-  genuine `WM_SIZE` — **verify on real resizes and update this note**; the
-  pre-Open `Application.Width`/`Height` still gives the best initial layout.
+- Excel relayout-on-resize: the pre-Open `Application.Width`/`Height` gives the
+  best initial layout. Excel is now a top-level window receiving genuine
+  `WM_SIZE` — behaviour may be better than the old reparent model.
 
 ## Future work (not blocking)
 

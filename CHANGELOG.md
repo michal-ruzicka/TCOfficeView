@@ -7,96 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Interactive Excel full mode, plus small UX improvements.
+Full-mode preview for all Office apps is now fully interactive and much 
+more reliable. Rapid `Ctrl+Q`/`F3` browsing among Office files no longer 
+triggers a wave of cold-starts if full mode is used.
 
 > **Upgrading from an earlier version?**  Total Commander keeps an
 > already-configured detect string when a plugin is replaced, so
-> users coming from v2.1.0 or earlier won't automatically pick up
+> users coming **from v2.1.0 or earlier** won't automatically pick up
 > the new universal file-type support — see
 > [Upgrading from an Earlier Version in `README.md`](README.md#upgrading-from-an-earlier-version).
 
 ### Added
 
-- **Excel full mode is now interactive.**  The full-mode Excel preview used to
-  render correctly but be effectively read-only — clicking cells, switching
-  sheet tabs and using the ribbon did not work.  It now behaves like a normal
-  (read-only) Excel window: cell selection, sheet-tab switching, scrolling and
-  the ribbon all work, and it tracks the Lister pane as you move or resize
-  Total Commander.  It also no longer stays anchored to its load-time size
-  after a resize (no need to close and reopen the Lister).  Achieving this
-  required re-architecting how Excel full mode is hosted — see the overlay
-  change under *Changed* below.  The **→ Quick** button still works as before;
-  Word and PowerPoint full mode are unchanged.
+- **Word, Excel and PowerPoint full mode are now fully interactive and much
+  more reliable.**
+  Full-mode previews used to render almost correctly but especially in Excel 
+  clicking, scrolling and ribbon buttons did not work always correctly.
+  All three apps now behave like normal read-only Office windows.  Achieving 
+  this required re-architecting all three from window embedding to a 
+  top-level overlay — see *Changed* below.  The **→ Quick** button still 
+  works as before.
+- **Configurable dwell-time before starting an Office full-mode load
+  (`[Mode] FullLoadDelayMs`, default 1000 ms).**  When you navigate to a
+  Word, Excel or PowerPoint file that would open in full mode (including
+  via auto-fallback), the plugin waits this long before launching the
+  Office application.  If you move to a different file within that window
+  the timer resets, so rapid arrow-key browsing through a folder of Office
+  documents does not trigger a wave of expensive Office cold-starts — only
+  the file you actually pause on gets loaded.  The delay also applies to
+  `quick-switchable` files when auto-fallback is enabled (SharePoint
+  cross-tenant documents).  Set to `0` to disable and load immediately.
+  The delay never applies to the `→ Full` mode-switch button — that always
+  loads immediately because the user explicitly requested it.
 
 ### Changed
 
-- **Excel full mode re-architected from window embedding to a top-level
-  overlay.**  Word, Excel and PowerPoint full mode all used to *embed* the real
-  Office window — reparent it as a child of the Lister pane.  Excel full mode
-  has been changed to instead keep Excel a borderless **top-level window
-  floated over the pane**.  This is the only way to make it foreground-capable,
-  and therefore interactive (cell selection, sheet tabs, ribbon — see *Added*);
-  a reparented child of another process can never take the foreground, which is
-  why the embedded version was effectively read-only.  Behavioural consequences
-  worth knowing:
-    - The Excel preview is live only while Total Commander is the front window.
-      Switch to another application and the pane shows a **frozen snapshot** of
-      the last Excel state (still readable) until you switch back.
-    - Modern Excel draws its own title bar, so its **Close** button is present
-      even on our frameless window; closing the preview that way tears it down
-      and shows a "Preview was closed." message instead of a blank pane.
-  Word and PowerPoint full mode are unchanged (still embedded).
-- **Mark-of-the-Web handling delegated to Office in full mode.**
-  TCOfficeView previously intercepted MOTW-blocked files before
-  full-mode load and forced them through our own Unblock fallback
-  panel — out of concern that `Documents.Open(ReadOnly=True)` might
-  bypass Office's Protected View.  In practice Word, Excel and
-  PowerPoint apply Protected View automatically to MOTW files
-  opened via Automation (yellow "Enable Editing" banner, content
-  visible in a read-only sandbox), so this pre-check served no
-  purpose for the user.  It has been removed from the explicit-full
-  branch of `LoadFileWithModeSta` — MOTW files configured for `full`
-  or `full-switchable` now flow straight into Office, which displays
-  its own Protected View banner.
-
-  The auto-fallback path (quick-switchable) still skips MOTW files
-  on purpose.  MOTW is the most common reason a quick handler
-  refuses to render an Office file, and a single click on the
-  **Unblock this file** button restores quick mode — which is
-  simpler and lighter than full.  Silently auto-falling-back to
-  full would deprive users of that simpler path.  Cross-tenant
-  SharePoint documents that are also MOTW resolve naturally: after
-  Unblock the file reloads, quick still fails (cross-tenant
-  authentication is independent of MOTW), and at that second LOAD
-  the MOTW guard no longer fires so auto-fallback proceeds to full
-  mode as usual.
-- **Various small UI improvements.**
+- **All three Office apps re-architected from window embedding to a
+  top-level overlay.**  Word, Excel and PowerPoint full mode all used to
+  *embed* the real Office window — reparent it as a child of the Lister
+  pane.  All three are now kept as a borderless **top-level window floated
+  over the pane**.  This is the only way to make them foreground-capable,
+  and therefore interactive (especially very important for Excel windows); 
+  a reparented child of another process can never take the foreground, which 
+  is why the embedded versions were limited in some functionality.
+  
+  Behavioural consequences worth knowing:
+    - The preview is live only while Total Commander is the front window.
+      Switch to another application and the pane shows a **frozen snapshot**
+      of the last Office state (still readable) until you switch back.
+    - Modern Office apps draw their own title bar, so the **Close** button is
+      present even on a frameless window; closing the preview that way tears
+      it down and shows a "Full preview was closed" message instead of a
+      blank pane.
+    - The grey close-guard strip that used to cover the top of 
+      Word/Excel/PowerPoint full previews is gone — it was needed only to 
+      intercept the close button on embedded windows (resulting in closing 
+      lister [when `F3` was used] or even whole Total Commander window [when 
+      `Ctrl+Q` was used]), and is not needed in the overlay model.
+    - A "Preview is loading…" indicator appears for full preview mode.
+- **Mark-of-the-Web blocking enforced in full mode.**
+  Files opened via OLE Automation do not trigger Office's Protected View
+  pipeline — the application trusts its COM caller and opens the file
+  without the "Enable Editing" quarantine banner, bypassing the
+  security control MOTW is meant to enforce.  TCOfficeView now applies
+  its own MOTW check before launching any Office full-mode load: if
+  the file is MOTW-blocked (Internet or Restricted zone), the Unblock
+  fallback panel is shown instead of starting Office.  After clicking
+  **Unblock this file** the preview reloads in full mode as normal.
+  Quick and auto-fallback paths are unchanged.
+- **Unblock button made simpler** on the MOTW info page.
 
 ### Fixed
 
-- **Smoother rapid switching between Office files in full mode.**  Skimming a
-  folder with the arrow keys (e.g. in Quick View) used to start a full Office
-  load for every file flicked past, which is far slower than you can scroll —
-  so the preview lagged behind, an Excel button could linger in the taskbar,
-  and the **→ Quick** button could end up hidden behind the Excel window. LOAD
-  requests are now coalesced: while one load runs, only the most recent request
-  is remembered and loaded once the current one finishes, so the file you land
-  on is what gets rendered and the final state is always complete. The Excel
-  preview window is also removed from the taskbar reliably.
-- **Embedded Office no longer loads with a collapsed ribbon / full-screen
-  look.**  A window-hide optimisation added in v2.2.1 (to speed up
-  embedding and avoid a flash) was applied to all three Office apps, but
-  hiding the window mid-embed left Word/Excel laying out their ribbon and
-  toolbars at the wrong size.  The optimisation is now applied only to
-  PowerPoint, which is the only app whose window is actually on screen at
-  that point.  (Excel full mode additionally moved to the new top-level
-  overlay described above, which sidesteps the issue entirely.)
-- **Close-button guard now fully covers Office's title-bar X.**
-  The invisible overlay that swallows clicks aimed at the embedded
-  Word / PowerPoint close button was 40 px tall, which on
-  current Office builds left the bottom edge of the X glyph poking
-  out below the guard — close enough for a user to hit it
-  accidentally.  We now use a 50 px guard.
+- **Rapid switching between Office files no longer triggers a load for
+  every file flicked past.**  Two complementary debounce mechanisms now
+  work together: a dwell-time timer (see `FullLoadDelayMs` above) prevents
+  the Office cold-start from starting at all for files you navigate through
+  quickly, and a message-queue trailing-edge filter skips queued LOAD
+  requests when a newer one is already waiting — so only the file you
+  actually land on gets rendered.  This also applies to the auto-fallback
+  path for SharePoint cross-tenant documents (which previously could trigger
+  Office cold-starts even on files the user had already left).
 
 ## [v2.2.2] – 2026-05-26
 
