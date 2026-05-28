@@ -773,11 +773,20 @@ struct HostState
     std::wstring        pendingLoadPath;
 
     // Dwell-time debounce (see kFullLoadDeferTimerId and g_fullLoadDelayMs).
-    // When a LOAD arrives for a file that may need an Office COM launch
-    // (full/full-switchable, or quick-switchable with auto-fallback), the load
-    // is deferred rather than started immediately. Rapid navigation cancels
-    // the timer; only files the user actually pauses on trigger the COM launch.
+    // Two cases share one timer:
+    //
+    //   deferredLoadFull == false  — WM_HOST_LOAD for an explicit full-mode
+    //     file (full / full-switchable); timer fires → LoadFileSta(path).
+    //
+    //   deferredLoadFull == true   — auto-fallback from quick mode; quick
+    //     already ran and failed; timer fires → LoadFileWithModeSta(path,
+    //     deferredLoadApp, Full, false) to skip the quick attempt.
+    //
+    // Rapid navigation cancels the timer via KillTimer; only the file the
+    // user actually pauses on triggers the heavyweight Office COM launch.
     std::wstring        deferredLoadPath;
+    bool                deferredLoadFull = false;
+    AppKind             deferredLoadApp  = AppKind::Other;
 
     // Job Object that owns the Office processes we spawn via COM. With
     // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE set, the kernel kills every
@@ -1607,6 +1616,19 @@ static AppKind ClassifyByExtension(LPCWSTR path);
 static void UpdateModeButtonSta()
 {
     if (!g_state.hwndModeButton) return;
+
+    // While the auto-fallback dwell-time timer is pending (quick mode just
+    // failed for a SharePoint cross-tenant file and we are waiting to see
+    // if the user stays on this file before starting Office), the button is
+    // meaningless and potentially misleading: it would show "→ Full" but
+    // that mode is already scheduled to load automatically. Hide it for the
+    // entire dwell window; it will reappear with the correct "→ Quick" label
+    // once the full-mode load completes.
+    if (g_state.deferredLoadFull)
+    {
+        ShowWindow(g_state.hwndModeButton, SW_HIDE);
+        return;
+    }
 
     // Show the button only when the INI-configured mode for this file's
     // application type is one of the switchable variants.  Files whose
@@ -4683,39 +4705,59 @@ static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode,
             SelectMode(app) == Mode::QuickSwitchable &&
             IsAutoFallbackEnabled(app);
 
-        // When the dwell-time debounce is active, respect it for auto-
-        // fallback too. The quick-mode COM call can pump messages; if the
-        // user navigated away during it a newer LOAD is stored in
-        // pendingLoadPath. If the user moved on AFTER the quick load
-        // returned, the WM_HOST_LOAD may already be in hwndSta's queue.
-        // Either way, launching the real Office app for a file the user
-        // has already left would be wasted work and is exactly what the
-        // dwell-time debounce was designed to prevent.
+        // If a newer LOAD is already waiting (user navigated away during the
+        // quick-mode COM call), skip auto-fallback entirely — the new LOAD
+        // will process the correct file. This is a lightweight safety net;
+        // the primary throttle is the dwell-time timer below.
         //
-        // A peek here is intentionally PM_NOREMOVE — we do not consume
-        // the message; we just use its presence as a signal to skip.
-        // loadingInProgress is already true, so the queued WM_HOST_LOAD
-        // will be handled as a re-entrant pendingLoadPath store once we
-        // return to the message pump.
+        // PM_NOREMOVE: we just peek; loadingInProgress is true so the
+        // queued WM_HOST_LOAD will store itself in pendingLoadPath when
+        // the message loop next dispatches it.
         const bool newerLoadPending =
-            (g_fullLoadDelayMs > 0) &&
-            (!g_state.pendingLoadPath.empty() ||
-             [&]() -> bool {
-                 MSG probe = {};
-                 return !!PeekMessageW(&probe, g_state.hwndSta,
-                                       WM_HOST_LOAD, WM_HOST_LOAD,
-                                       PM_NOREMOVE);
-             }());
+            !g_state.pendingLoadPath.empty() ||
+            [&]() -> bool {
+                MSG probe = {};
+                return !!PeekMessageW(&probe, g_state.hwndSta,
+                                      WM_HOST_LOAD, WM_HOST_LOAD,
+                                      PM_NOREMOVE);
+            }();
 
         if (FAILED(quickHr) && fallbackPermitted && newerLoadPending)
         {
             HostLog(L"  quick mode failed (0x%08lX) — auto-fallback skipped "
-                    L"(newer LOAD pending; dwell-time debounce)",
+                    L"(newer LOAD pending)",
                     static_cast<long>(quickHr));
         }
 
         if (FAILED(quickHr) && fallbackPermitted && !newerLoadPending)
         {
+            if (g_fullLoadDelayMs > 0)
+            {
+                // Dwell-time debounce for auto-fallback. Quick mode ran and
+                // failed (typical: SharePoint cross-tenant document). Instead
+                // of starting Office immediately, arm the timer. If the user
+                // navigates away within the dwell window the timer is cancelled
+                // (by the next WM_HOST_LOAD) and Office is never launched.
+                // Only files the user actually pauses on pay the cold-start.
+                // deferredLoadFull=true tells the timer handler to call
+                // LoadFileWithModeSta directly in Full mode, bypassing quick.
+                HostLog(L"  quick mode failed (0x%08lX) — "
+                        L"deferring auto-fallback to full (%d ms)",
+                        static_cast<long>(quickHr), g_fullLoadDelayMs);
+                KillTimer(g_state.hwndSta, kFullLoadDeferTimerId);
+                g_state.deferredLoadPath = origPath;
+                g_state.deferredLoadFull = true;
+                g_state.deferredLoadApp  = app;
+                SetTimer(g_state.hwndSta, kFullLoadDeferTimerId,
+                         static_cast<UINT>(g_fullLoadDelayMs), nullptr);
+                // Show a loading indicator for the dwell window so the pane
+                // is not blank between the quick failure and the Office launch.
+                ShowLoadingSta(L"Preview is loading…");
+                // result stays S_OK; the timer fires the actual load.
+            }
+            else
+            {
+            // g_fullLoadDelayMs == 0: no delay configured — load immediately.
             HostLog(L"  quick mode failed (0x%08lX) for Office file — "
                     L"auto-fallback to full",
                     static_cast<long>(quickHr));
@@ -4759,6 +4801,7 @@ static HRESULT LoadFileWithModeSta(LPCWSTR origPath, AppKind app, Mode mode,
                 // Office startup failure.
                 ShowFallbackSta(path, quickHr);
             }
+            } // end else (g_fullLoadDelayMs == 0)
         }
         else if (FAILED(quickHr))
         {
@@ -4898,33 +4941,34 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
             }
 
-            // Dwell-time debounce for Office files that may need a full-mode
-            // (OLE Automation) launch — either because they are configured for
-            // full/full-switchable, OR because they are quick-switchable with
-            // auto-fallback enabled (SharePoint cross-tenant documents fail in
-            // quick mode and auto-fall back to full in ~70 ms, well within the
-            // dwell window). [Mode] FullLoadDelayMs controls the delay
+            // Dwell-time debounce for explicitly full-mode files (full /
+            // full-switchable). [Mode] FullLoadDelayMs controls the delay
             // (default 1000 ms; 0 = disabled). Only the file the user actually
-            // pauses on ever triggers the heavyweight Office cold-start.
+            // pauses on triggers the heavyweight Office cold-start.
             //
-            // NOT taken when a load is already in progress (the re-entrant
-            // pendingLoadPath mechanism handles that), NOT taken for quick
-            // (non-switchable) or Other-type files, and NOT taken when
-            // g_fullLoadDelayMs == 0.
+            // Quick-switchable files are NOT deferred here — quick mode is
+            // fast and succeeds for most files. When quick mode fails and
+            // auto-fallback to full mode is needed, the deferral is applied
+            // there (inside LoadFileWithModeSta), so only SharePoint cross-
+            // tenant documents (those that actually need the real Office app)
+            // incur the dwell-time delay.
+            //
+            // NOT taken when a load is already in progress (re-entrant
+            // pendingLoadPath handles that), NOT taken for Other-type files
+            // (no full-mode available), and NOT taken when g_fullLoadDelayMs == 0.
             if (!g_state.loadingInProgress && g_fullLoadDelayMs > 0)
             {
-                const AppKind app = ClassifyByExtension(path);
+                const AppKind app     = ClassifyByExtension(path);
                 const Mode    cfgMode = (app != AppKind::Other)
                                         ? SelectMode(app) : Mode::Quick;
-                const bool mightNeedFull =
-                    (BaseMode(cfgMode) == Mode::Full) ||
-                    (cfgMode == Mode::QuickSwitchable && IsAutoFallbackEnabled(app));
-                if (mightNeedFull)
+                if (BaseMode(cfgMode) == Mode::Full)
                 {
                     HostLog(L"WM_HOST_LOAD: deferring full-mode load of '%s' (%d ms)",
                             path, g_fullLoadDelayMs);
                     KillTimer(hWnd, kFullLoadDeferTimerId);
                     g_state.deferredLoadPath = path;
+                    g_state.deferredLoadFull = false;
+                    g_state.deferredLoadApp  = AppKind::Other;
                     SetTimer(hWnd, kFullLoadDeferTimerId,
                              static_cast<UINT>(g_fullLoadDelayMs), nullptr);
                     PipeWriteUtf16(g_state.hPipe, L"OK\n");
@@ -4938,6 +4982,8 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             // immediate load supersedes it.
             KillTimer(hWnd, kFullLoadDeferTimerId);
             g_state.deferredLoadPath.clear();
+            g_state.deferredLoadFull = false;
+            g_state.deferredLoadApp  = AppKind::Other;
 
             HRESULT hr = LoadFileSta(path);
             if (SUCCEEDED(hr))
@@ -4959,19 +5005,49 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_TIMER:
             if (wp == kFullLoadDeferTimerId)
             {
-                // Dwell-time elapsed: the user has stayed on this file long
-                // enough that we should actually load it. Extract the path
-                // and load it; if another load is already in progress
-                // (shouldn't happen in practice, but be safe), drop this
-                // deferred load rather than queuing behind it.
+                // Dwell-time elapsed. Extract and clear the deferred state
+                // before calling any load function (which may re-arm the timer
+                // for a subsequent auto-fallback).
                 KillTimer(hWnd, kFullLoadDeferTimerId);
                 std::wstring deferredPath;
                 deferredPath.swap(g_state.deferredLoadPath);
+                const bool    fullMode = g_state.deferredLoadFull;
+                const AppKind defApp   = g_state.deferredLoadApp;
+                g_state.deferredLoadFull = false;
+                g_state.deferredLoadApp  = AppKind::Other;
+
                 if (!deferredPath.empty() && !g_state.loadingInProgress)
                 {
-                    HostLog(L"kFullLoadDeferTimer: loading '%s'",
-                            deferredPath.c_str());
-                    LoadFileSta(deferredPath.c_str());
+                    if (!fullMode)
+                    {
+                        // Explicit full-mode file deferred from WM_HOST_LOAD.
+                        // Go through LoadFileSta so the INI-configured mode is
+                        // picked up and the pendingLoadPath debounce loop runs.
+                        HostLog(L"kFullLoadDeferTimer: loading '%s'",
+                                deferredPath.c_str());
+                        LoadFileSta(deferredPath.c_str());
+                    }
+                    else
+                    {
+                        // Quick-mode auto-fallback: quick already ran and failed;
+                        // skip straight to full mode. Mirror LoadFileSta's
+                        // pendingLoadPath loop so LOADs that arrived during the
+                        // full-mode COM calls are drained properly.
+                        HostLog(L"kFullLoadDeferTimer: auto-fallback to full for '%s'",
+                                deferredPath.c_str());
+                        LoadFileWithModeSta(deferredPath.c_str(), defApp,
+                                            Mode::Full, /*allowAutoFallback=*/false);
+                        // Drain any LOAD that arrived during the full-mode call.
+                        while (!g_state.pendingLoadPath.empty())
+                        {
+                            std::wstring next = std::move(g_state.pendingLoadPath);
+                            g_state.pendingLoadPath.clear();
+                            if (next == g_state.currentFile) break;
+                            AppKind nApp = ClassifyByExtension(next.c_str());
+                            LoadFileWithModeSta(next.c_str(), nApp,
+                                                BaseMode(SelectMode(nApp)));
+                        }
+                    }
                 }
                 return 0;
             }
@@ -4994,6 +5070,8 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             // explicitly acting on the current file, so start immediately.
             KillTimer(hWnd, kFullLoadDeferTimerId);
             g_state.deferredLoadPath.clear();
+            g_state.deferredLoadFull = false;
+            g_state.deferredLoadApp  = AppKind::Other;
 
             if (g_state.currentFile.empty())
             {
@@ -5036,6 +5114,8 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             // when the fallback was shown.
             KillTimer(hWnd, kFullLoadDeferTimerId);
             g_state.deferredLoadPath.clear();
+            g_state.deferredLoadFull = false;
+            g_state.deferredLoadApp  = AppKind::Other;
 
             if (g_state.currentFile.empty())
             {
@@ -5071,6 +5151,8 @@ static LRESULT CALLBACK StaWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             HostLog(L"WM_HOST_CLOSE");
             KillTimer(hWnd, kFullLoadDeferTimerId);
             g_state.deferredLoadPath.clear();
+            g_state.deferredLoadFull = false;
+            g_state.deferredLoadApp  = AppKind::Other;
             UnloadHandlerSta();
             // Quit any Office app that's still alive. Each is a no-op if
             // its slot is empty.

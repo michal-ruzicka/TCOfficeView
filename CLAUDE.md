@@ -165,12 +165,17 @@ Sections currently honoured:
 - `[Mode] FullLoadDelayMs=` — dwell-time delay in milliseconds before
   starting a full-mode OLE Automation load. Default `1000`. `0` disables
   the delay entirely. Clamped to 0..10000. Read into `g_fullLoadDelayMs`.
-  When a LOAD arrives for a file whose configured mode is `full` or
-  `full-switchable`, `WM_HOST_LOAD` arms a one-shot timer
-  (`kFullLoadDeferTimerId` on `hwndSta`) instead of loading immediately.
-  Rapid navigation resets the timer; only the file the user actually stops
-  on triggers the Office COM launch. Does not apply to explicit mode-switch
-  button clicks (`WM_HOST_SWITCH_MODE`).
+  The timer fires from two different sites depending on the configured mode:
+  - `full` / `full-switchable`: `WM_HOST_LOAD` arms `kFullLoadDeferTimerId`
+    immediately on navigation. Rapid navigation resets the timer; only the
+    file the user actually stops on ever reaches `LoadFileSta`.
+  - `quick-switchable` with auto-fallback: quick mode runs immediately (no
+    delay). The timer is armed inside `LoadFileWithModeSta` ONLY AFTER quick
+    mode fails and `fallbackPermitted && !newerLoadPending`. The timer handler
+    calls `LoadFileWithModeSta(path, app, Full, false)` directly, bypassing
+    the quick-mode attempt. While the timer is pending `deferredLoadFull=true`
+    suppresses the mode-switch button in `UpdateModeButtonSta`.
+  Does not apply to `WM_HOST_SWITCH_MODE` (explicit user action).
 - `[AutoFallback] Word=` / `Excel=` / `PowerPoint=` — per-app toggle
   (default `true`) for the quick→full auto-fallback path described
   below. Accepts true/false, yes/no, on/off, 1/0. Read into

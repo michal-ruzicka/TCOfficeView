@@ -27,18 +27,25 @@ triggers a wave of cold-starts if full mode is used.
   this required re-architecting all three from window embedding to a 
   top-level overlay — see *Changed* below.  The **→ Quick** button still 
   works as before.
-- **Configurable dwell-time before starting an Office full-mode load
-  (`[Mode] FullLoadDelayMs`, default 1000 ms).**  When you navigate to a
-  Word, Excel or PowerPoint file that would open in full mode (including
-  via auto-fallback), the plugin waits this long before launching the
-  Office application.  If you move to a different file within that window
-  the timer resets, so rapid arrow-key browsing through a folder of Office
-  documents does not trigger a wave of expensive Office cold-starts — only
-  the file you actually pause on gets loaded.  The delay also applies to
-  `quick-switchable` files when auto-fallback is enabled (SharePoint
-  cross-tenant documents).  Set to `0` to disable and load immediately.
-  The delay never applies to the `→ Full` mode-switch button — that always
-  loads immediately because the user explicitly requested it.
+- **Configurable dwell-time before starting an Office application
+  (`[Mode] FullLoadDelayMs`, default 1000 ms).**  The delay prevents
+  rapid arrow-key browsing from triggering a wave of expensive Office
+  cold-starts.  It works differently by mode:
+    - `full` / `full-switchable` — the Office launch is deferred from
+      initial navigation; if the user moves on within the dwell window
+      the launch is cancelled entirely and Office is never touched.
+    - `quick-switchable` (the default) — quick mode runs immediately
+      (no delay) and succeeds for ordinary Office files.  The delay
+      kicks in only when the quick handler fails and auto-fallback to
+      full mode would fire — which in practice means SharePoint
+      documents synced from a non-primary Microsoft 365 tenant.  For
+      those files "Preview is loading…" is shown during the dwell
+      window; the mode-switch button is hidden.  Moving to another file
+      within that window cancels the Office launch.  Files that load
+      fine in quick mode are completely unaffected.
+  Set to `0` to disable and load immediately (restores pre-dwell-time
+  behaviour).  The delay never applies to the `→ Full` mode-switch
+  button — that always loads immediately.
 
 ### Changed
 
@@ -57,7 +64,7 @@ triggers a wave of cold-starts if full mode is used.
       of the last Office state (still readable) until you switch back.
     - Modern Office apps draw their own title bar, so the **Close** button is
       present even on a frameless window; closing the preview that way tears
-      it down and shows a "Full preview was closed" message instead of a
+      it down and shows a "Full preview was closed." message instead of a
       blank pane.
     - The grey close-guard strip that used to cover the top of 
       Word/Excel/PowerPoint full previews is gone — it was needed only to 

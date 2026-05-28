@@ -285,12 +285,25 @@ FullLoadDelayMs=1000   ; delay in ms before starting a full-mode Office load
                        ; 0 = disabled (load immediately)
 ```
 
-The delay applies to files configured for `full` or `full-switchable`,
-and also to `quick-switchable` files when auto-fallback is enabled
-(because those may silently retry in full mode if the quick handler
-fails). It does **not** apply when you click the `→ Full` overlay
-button — that always loads immediately because you explicitly requested
-the switch.
+The delay works differently depending on the configured mode:
+
+- **`full` / `full-switchable`:** The Office launch is deferred from
+  the moment you navigate to the file. If you move away within the
+  dwell window, the launch is cancelled entirely.
+
+- **`quick-switchable` (default):** Quick mode runs **immediately**.
+  The delay kicks in only if the quick preview handler fails — which
+  typically happens for documents synced from a non-primary Microsoft
+  365 tenant (SharePoint cross-tenant). In that case the plugin shows
+  "Preview is loading…" and waits the dwell-time before starting the
+  real Office application. If you move to a different file within that
+  window, the Office launch is cancelled.
+
+  Files that succeed in quick mode are completely unaffected by this
+  setting — they load at full speed with no delay.
+
+The delay does **not** apply when you click the `→ Full` overlay
+button — that always loads immediately.
 
 #### Auto-Fallback for Multi-Tenant SharePoint Documents
 
