@@ -1,0 +1,11 @@
+# Normalize all text files to CRLF on checkout — this is a Windows-only tool
+# and CRLF is the native line ending for Windows text editors.
+# git still stores LF internally; the eol=crlf applies on checkout.
+* text=auto eol=crlf
+
+# Explicitly mark binary formats so git never touches their bytes.
+*.wlx    binary
+*.wlx64  binary
+*.exe    binary
+*.dll    binary
+*.zip    binary

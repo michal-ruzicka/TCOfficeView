@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**No user-visible feature changes. This release adds reproducible builds** — 
+locks the build toolchain so that the same source commit always produces 
+byte-identical binaries, giving users an independent way to verify a release 
+binary against the published source code.
+
+See [Verifying Releases](README.md#verifying-releases) in `README.md` and
+[Reproducible Builds](CONTRIBUTING.md#reproducible-builds) in `CONTRIBUTING.md`
+for the verification workflow and the full technical details.
+
+### Added
+
+- **`setup-build-environment-example.cmd`** — a one-shot script that sets up a
+  complete build environment on a fresh Windows installation (VM, 
+  [Windows Sandbox](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/),
+  or similar), downloads the source tree from GitHub, installs Visual
+  Studio Build Tools and CMake, and runs `build.cmd` to produce the
+  distributable ZIP. Every step is visible and documented inside the script.
+
+### Changed
+
+- **Build toolchain pinned for reproducible builds.** The exact MSVC compiler
+  version (`19.51.36246`), toolset (`14.51`) and Windows SDK (`10.0.26100.0`)
+  are locked in `build.cmd` and the CI workflow. The build uses the NMake
+  Makefiles generator with the compiler environment activated per architecture
+  via `VsDevCmd.bat -vcvars_ver=14.51` — no VS generator flag is needed and
+  cmake's VS instance detection is bypassed entirely.
+  The MSVC compiler flags `/Brepro`, `/experimental:deterministic` and linker
+  flag `/BREPRO` eliminate per-build noise from object files and the PE
+  timestamp. Source-file paths in debug info are normalised via `/pathmap`.
+  File timestamps in the ZIP are set to `release-date=` from `pluginst.inf`.
+- **`sha256sums.sha256` added to every release ZIP.** The file lists the SHA-256
+  of every other file in the archive. The CI build log and `build.cmd` both
+  print the SHA-256 of the produced ZIP itself, providing an independent
+  reference for cross-build comparison.
+- **Line endings in ZIP text files normalised to CRLF.** Markdown, INI and
+  INF files in the release ZIP are now guaranteed to use Windows line endings
+  regardless of the platform or git configuration the build was run under.
+
 ## [v2.3.0] – 2026-05-28
 
 Full-mode preview for all Office apps is now fully interactive and much 
@@ -732,6 +772,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.3.0...HEAD
 [v2.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.2...v2.3.0
 [v2.2.2]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.1...v2.2.2
 [v2.2.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.0...v2.2.1

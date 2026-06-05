@@ -82,6 +82,21 @@ gpg --verify TCOfficeView.vX.Y.Z.zip.asc TCOfficeView.vX.Y.Z.zip
 GPG should report `Good signature from "Michal Růžička <ruzicka.mich@gmail.com>"`.
 The full fingerprint of the signing key is `489C 5EC8 0FD6 2BE8 9E59  B4F7 19C1 3E8C E0F5 DB61`.
 
+#### Reproducible Builds
+
+Every release is built from a pinned, identical toolchain, so the same
+source code always produces byte-for-byte identical binaries. This means
+you are not just trusting the GPG signature — you can independently confirm
+that the published binary matches the published source code by building it
+yourself and comparing the SHA-256 of the ZIP against the released ZIP archive 
+or the [CI build log](https://github.com/michal-ruzicka/TCOfficeView/actions) 
+for the release commit.
+
+Full details — how the build achieves this, and how to run a verification
+build yourself — are in
+[Reproducible Builds](CONTRIBUTING.md#reproducible-builds) in the developer
+documentation.
+
 ## Usage
 
 There is no UI to configure at runtime — just press **F3** (or use Quick View
