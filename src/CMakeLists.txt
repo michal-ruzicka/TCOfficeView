@@ -17,6 +17,18 @@ add_compile_definitions(
 # /utf-8 is equivalent to /source-charset:utf-8 /execution-charset:utf-8.
 if(MSVC)
     add_compile_options(/utf-8)
+
+    # Reproducible builds: strip per-build noise from object files and zero the
+    # PE TimeDateStamp so the same source always produces the same binary.
+    # /Brepro removes the non-deterministic hash MSVC writes into every .obj.
+    # /BREPRO (linker) zeroes the PE timestamp field.
+    add_compile_options(/Brepro /experimental:deterministic)
+    add_link_options(/BREPRO)
+
+    # Normalize absolute source-file paths in debug info so binaries are
+    # identical regardless of where the repo is checked out.
+    file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}/" _src_native)
+    add_compile_options("/pathmap:${_src_native}=./")
 endif()
 
 # Link the static C/C++ runtime so the artifacts have no vcruntime*.dll

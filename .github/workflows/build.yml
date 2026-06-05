@@ -7,6 +7,11 @@ name: Build
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you running this manually? Testing reproducibility (after Microsoft's build environment changes?) or something else?"
+        required: false
 
 # Restrict the GITHUB_TOKEN to the minimum required — read-only checkout.
 # The workflow does not publish releases or open PRs, so no write access
@@ -27,10 +32,19 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # build.cmd drives CMake for both x86 and x64, stages the artifacts,
-      # and creates dist\TCOfficeView.v<version>.zip.
-      # No MSVC setup action needed: build.cmd only calls cmake, which
-      # locates Visual Studio via vswhere and invokes it internally.
+      # Install Visual Studio 2026 Build Tools (C++ workload) and CMake.
+      - name: Setup the build environment
+        shell: cmd
+        run: |
+          curl.exe -L -o %TEMP%\vs_buildtools.exe https://aka.ms/vs/18/stable/vs_buildtools.exe
+          %TEMP%\vs_buildtools.exe --config .\.vsconfig ^
+            --installPath C:\BuildTools ^
+            --quiet --wait --norestart --nocache
+          winget install --id Kitware.CMake --exact --silent --accept-package-agreements --accept-source-agreements
+
+      # build.cmd locates Visual Studio Build Tools via vswhere, activates the
+      # compiler environment for each target architecture via VsDevCmd.bat,
+      # and drives CMake (NMake Makefiles generator) for both x64 and x86.
       - name: Build (x86 + x64)
         shell: cmd
         run: build.cmd
@@ -45,3 +59,4 @@ jobs:
           path: dist\*.zip
           if-no-files-found: error
           retention-days: 90
+

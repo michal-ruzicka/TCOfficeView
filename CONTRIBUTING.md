@@ -12,26 +12,55 @@ reports and patches are welcome via the project's
 - [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/) with
   the *Desktop development with C++* workload. The full Visual Studio IDE works
   too, but is not required.
-- [**CMake 3.20+**](https://cmake.org/). Often bundled with the Build Tools
-  workload.
+- [**CMake**](https://cmake.org/) 3.20 or newer. Use CMake bundled with Visual 
+  Studio or install separately from cmake.org, via `winget install Kitware.CMake`, 
+  or via `choco upgrade cmake`. The build uses the NMake Makefiles generator, 
+  which has no cmake version requirement beyond the minimum above.
 
 No .NET SDK, no extra runtime — the project is pure C++ / Win32 / COM,
 linked against the static MSVC runtime.
 
+## Repo Layout
+
+| Path | Description |
+|---|---|
+| `.github/` | GitHub Actions CI workflow (`workflows/build.yml`) |
+| `build\` | CMake out-of-source build trees (gitignored) |
+| `dist\` | Released ZIP bundles (gitignored) |
+| `src\` | C++ sources, INI/INF/manifest, `CMakeLists.txt` |
+| `.gitattributes` | Line-ending normalization rules |
+| `.gitignore` | Excludes `build\` and `dist\` from version control |
+| `.vsconfig` | Visual Studio component selection; pins the MSVC toolset and Windows SDK versions for the CI workflow and `setup-build-environment-example.cmd` |
+| `build.cmd` | Top-level build driver — the only file outside `src\` that the build touches |
+| `CHANGELOG.md` | Release notes in Keep a Changelog format; bundled in every release ZIP |
+| `CLAUDE.md` | Project notes for Claude Code; bundled in every release ZIP |
+| `CONTRIBUTING.md` | Developer documentation (this file); bundled in every release ZIP |
+| `LICENSE.md` | Apache License 2.0; bundled in every release ZIP |
+| `README.md` | End-user documentation; bundled in every release ZIP |
+| `setup-build-environment-example.cmd` | One-shot script: downloads sources from GitHub, installs Visual Studio Build Tools and CMake, and runs `build.cmd`; designed for VMs and Windows Sandbox |
+
 ## Build
 
-From a Developer Command Prompt (or any shell where `cmake` and MSVC are
-on `PATH`):
+From any command prompt where `vswhere.exe` can be found:
 
 ```cmd
 build.cmd
 ```
 
-The script drives CMake for both bitnesses (x86 and x64) using the sources
-under `src\` and packages the artifacts into
-`dist\TCOfficeView.v<version>.zip` — the same auto-install bundle
-described in *Installation*. The version is read from `src\pluginst.inf`
-as the single source of truth; bump it there before tagging a release.
+The script locates Visual Studio Build Tools via `vswhere` and activates the
+compiler environment itself — no Developer Command Prompt is needed. It drives
+CMake (NMake Makefiles generator) for both bitnesses (x86 and x64) using the
+sources under `src\` and packages the artifacts into
+`dist\TCOfficeView.v<version>.zip` — the same auto-install bundle described
+in *Installation*. The version is read from `src\pluginst.inf` as the single
+source of truth; bump it there before tagging a release.
+
+To set up a build environment from scratch on a fresh Windows installation
+(VM, [Windows Sandbox](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/),
+or similar), `setup-build-environment-example.cmd` in the repo root downloads 
+the sources, installs the required toolchain, and runs `build.cmd` 
+automatically. Open it in a text editor before running — it is intentionally 
+readable so you can see and trust every step.
 
 The same `build.cmd` is what the GitHub Actions CI workflow runs on every
 push and pull request. The workflow uploads the resulting ZIP as a
@@ -45,15 +74,150 @@ policy). Dependabot is configured to open monthly PRs that bump those SHAs
 when upstream actions release new versions — do not update the SHAs by
 hand.
 
-## Repo Layout
+### Reproducible Builds
 
-- `src\` — C++ sources, INI/INF/manifest, `CMakeLists.txt`
-- `build.cmd` — top-level build driver (the only file outside `src\`
-  that the build touches)
-- `build\` — CMake out-of-source build trees (gitignored)
-- `dist\` — released ZIP bundles (gitignored)
-- Markdown files (README, CONTRIBUTING, CHANGELOG, LICENSE, CLAUDE)
-  live at the repo root and are bundled into every release ZIP.
+Every build from the same source commit produces byte-identical binaries,
+regardless of when or where the build runs. Users can therefore independently
+verify that a published ZIP was built from the published source code without
+having to trust the build infrastructure.
+
+#### What makes the build deterministic
+
+Four independent sources of non-determinism are eliminated:
+
+| Source | Mechanism |
+|---|---|
+| PE `TimeDateStamp` field in `.dll` / `.exe` | Linker flag `/BREPRO` zeros it |
+| Non-deterministic hash in MSVC `.obj` files | Compiler flags `/Brepro /experimental:deterministic` |
+| Absolute source paths in debug info | Compiler flag `/pathmap:<src-dir>=./` strips the machine-local prefix |
+| File modification times in ZIP entries | Normalized to `release-date=` read from `src\pluginst.inf` |
+
+Three additional parameters are pinned so that "same source" also means "same
+compiler output":
+
+| Parameter | Pinned to | Files that must match |
+|---|---|---|
+| Exact `cl.exe` version | `19.51.36246` | `build.cmd` (`EXPECTED_CL`) |
+| MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig`, CI workflow |
+| Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig`, CI workflow |
+
+`build.cmd` checks `cl.exe` against `EXPECTED_CL` and prints a warning if
+they differ — the build continues regardless. The check exists so that when
+a local and a CI build produce different hashes, the first thing to look at
+in both logs is the `cl.exe` version line. Two builds from the same toolset
+major.minor but different `cl.exe` patch versions will produce different
+binaries; this happens when VS patches land at different times on local
+machines and CI runner images. Update `EXPECTED_CL` (with a matching VS
+update on both sides) when you want to re-establish bit-for-bit parity.
+
+The toolset is selected by passing `-vcvars_ver=%CMAKE_T%` to `VsDevCmd.bat`
+before invoking CMake. The SDK is enforced by CMake:
+
+```
+cmake ... -DCMAKE_SYSTEM_VERSION=10.0.26100.0
+```
+
+If the SDK is missing, CMake fails with a descriptive error rather than
+silently falling back to a different version.
+
+#### Verifying a build
+
+The independent reference point is the SHA-256 of the ZIP itself, not files
+inside it — `sha256sums.sha256` is bundled inside the same archive, so it is only
+as trustworthy as the ZIP it came from.
+
+To verify a release:
+
+1. Run `build.cmd` locally on the release commit. The script prints the SHA-256
+   of the produced ZIP at the end of its output.
+2. Compare that hash against the SHA-256 printed in the *Build (x86 + x64)*
+   step of the [GitHub Actions run](https://github.com/michal-ruzicka/TCOfficeView/actions)
+   for the same commit.
+3. Optionally, compare against the published release ZIP's SHA-256:
+   ```
+   certutil -hashfile dist\TCOfficeView.vX.Y.Z.zip SHA256
+   ```
+
+If all three match, the released ZIP is identical to what the source builds.
+
+`sha256sums.sha256` inside the ZIP is useful as a convenience check after
+extraction — to confirm that an individual file was not corrupted during
+download or extraction — but it is not an independent trust anchor.
+
+#### Upgrading the pinned toolchain
+
+When you adopt a new MSVC toolset or Windows SDK version, update **all three
+locations** listed below to keep them in sync. A mismatch causes either a
+build failure (CMake cannot find the requested toolset) or silent divergence
+between local and CI builds.
+
+##### MSVC toolset
+
+Identify the installed toolset version:
+
+```
+cl.exe /Bv
+```
+
+The path in the output contains the toolset directory, e.g.:
+`...\VC\Tools\MSVC\`**`14.51`**`.36231\bin\...`
+
+Use the first two numbers (`14.XX`) as the toolset token and the full
+four-part version (e.g. `19.51.36244`) as the exact compiler version.
+Update:
+
+1. **`build.cmd`** — the three pinned variables at the top of the file:
+   ```
+   set EXPECTED_CL=19.51.XXXXX
+   set CMAKE_T=14.XX
+   set CMAKE_SDK=10.0.XXXXX.X
+   ```
+2. **`.vsconfig`** — the `VC.Tools` component entry (this also covers the
+   CI workflow, which installs the toolchain from `.vsconfig`):
+   ```json
+   "Microsoft.VisualStudio.Component.VC.14.XX.x86.x64"
+   ```
+
+##### Windows SDK
+
+The SDK version is a five-digit build number, visible in VS Installer under
+the installed *Windows 11 SDK* component (e.g. `10.0.`**`26100`**`.0`).
+Update:
+
+1. **`build.cmd`** — both `cmake` configure lines:
+   ```
+   -DCMAKE_SYSTEM_VERSION=10.0.NNNNN.0
+   ```
+2. **`.vsconfig`** — the SDK component entry (this also covers the
+   CI workflow, which installs the toolchain from `.vsconfig`):
+   ```json
+   "Microsoft.VisualStudio.Component.Windows11SDK.NNNNN"
+   ```
+
+##### Visual Studio major version
+
+Each major Visual Studio release increments the product version number in the
+installation path (`\17\` for VS 2022, `\18\` for VS 2026, …). The build
+uses the NMake Makefiles generator driven by `VsDevCmd.bat`, so no CMake
+generator flag needs updating. What does change:
+
+1. **`.vsconfig`** — the toolset and SDK component IDs change with each major
+   VS release; update those using the guidance above.
+2. **`.github/workflows/build.yml`** — update the VS installer URL if the
+   stable channel URL changes (currently `https://aka.ms/vs/18/stable/vs_buildtools.exe`).
+
+Ensure CMake is new enough to support any `CMakeLists.txt` features in use
+(`winget install Kitware.CMake` or `choco upgrade cmake`).
+
+##### After any toolchain change
+
+Delete the stale CMake build trees so CMake picks up the new selection on the
+next run:
+
+```
+rmdir /S /Q build\x64 build\x86
+build.cmd
+```
 
 ## Architecture
 
