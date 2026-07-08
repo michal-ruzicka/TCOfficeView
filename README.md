@@ -111,9 +111,9 @@ installation:
 
 | Source | Extensions |
 |--------|------------|
-| Microsoft Word        | DOC, DOCX, DOCM, RTF |
-| Microsoft Excel       | XLS, XLSX, XLSM, XLSB |
-| Microsoft PowerPoint  | PPT, PPTX, PPTM |
+| Microsoft Word        | DOC, DOCX, DOCM, RTF, ODT, DOT, DOTX, DOTM |
+| Microsoft Excel       | XLS, XLSX, XLSM, XLSB, ODS, XLT, XLTX, XLTM |
+| Microsoft PowerPoint  | PPT, PPTX, PPTM, ODP, PPS, PPSX, PPSM, POT, POTX, POTM |
 | Microsoft Visio       | VSD, VSDX |
 | Outlook / Windows built-in mail previewer | MSG |
 | Microsoft Edge (built-in) / Adobe Acrobat Reader | PDF |
@@ -229,8 +229,11 @@ top-right corner of every Word / Excel / PowerPoint preview. One click
 flips the current preview to the other engine without changing your INI
 default. The switch is per-preview only — selecting another file (or
 re-opening the same one) returns to the configured default. The button
-is hidden for file types that have no full-mode equivalent (`.msg`,
-`.vsdx`) regardless of the setting.
+appears on every file type the application can open — including the
+OpenDocument formats (ODT, ODS, ODP), Office templates (DOT, DOTX,
+DOTM, XLT, XLTX, XLTM, POT, POTX, POTM) and PowerPoint slideshows
+(PPS, PPSX, PPSM) — and is hidden for file types that have no
+full-mode equivalent (`.msg`, `.vsdx`) regardless of the setting.
 
 All three apps run in **full mode** as borderless overlay windows 
 positioned over the Lister pane — not embedded inside it. The overlay is 
@@ -527,7 +530,7 @@ If you would rather keep a stricter, finite set of file types instead
 of `EXT="*"`, use this as the `<N>_detect=` value:
 
 ```
-EXT="DOC"|EXT="DOCX"|EXT="DOCM"|EXT="RTF"|EXT="XLS"|EXT="XLSX"|EXT="XLSM"|EXT="XLSB"|EXT="PPT"|EXT="PPTX"|EXT="PPTM"|EXT="VSD"|EXT="VSDX"|EXT="MSG"|EXT="HTML"|EXT="HTM"|EXT="PDF"
+EXT="DOC"|EXT="DOCX"|EXT="DOCM"|EXT="RTF"|EXT="ODT"|EXT="DOT"|EXT="DOTX"|EXT="DOTM"|EXT="XLS"|EXT="XLSX"|EXT="XLSM"|EXT="XLSB"|EXT="ODS"|EXT="XLT"|EXT="XLTX"|EXT="XLTM"|EXT="PPT"|EXT="PPTX"|EXT="PPTM"|EXT="ODP"|EXT="PPS"|EXT="PPSX"|EXT="PPSM"|EXT="POT"|EXT="POTX"|EXT="POTM"|EXT="VSD"|EXT="VSDX"|EXT="MSG"|EXT="HTML"|EXT="HTM"|EXT="PDF"
 ```
 
 With this list the plugin will be asked only about the common

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Full mode (and the mode-switch button) now covers OpenDocument files,
+  Office templates and PowerPoint slideshows.** Previously only the classic
+  Office extensions were recognised as Word / Excel / PowerPoint documents;
+  everything else — including formats those applications open natively —
+  was treated as a generic preview-handler file, so the **→ Full** button
+  never appeared and the quick→full auto-fallback never fired. The
+  recognised set now additionally includes:
+    - **Word** — ODT (OpenDocument Text), DOT, DOTX, DOTM (templates)
+    - **Excel** — ODS (OpenDocument Spreadsheet), XLT, XLTX, XLTM (templates)
+    - **PowerPoint** — ODP (OpenDocument Presentation), PPS, PPSX, PPSM
+      (slideshows), POT, POTX, POTM (templates)
+
+  OpenDocument templates (OTT, OTS, OTP) are not included because
+  Microsoft Office does not open them.
+
+### Fixed
+
+- **GitHub CI build restored.** The workflow now uses the CMake (and Ninja)
+  bundled with the Visual Studio Build Tools via the `VC.CMake.Project`
+  component instead of installing CMake separately through winget. This also
+  keeps the local and CI toolchains identical for reproducible builds.
+  The pinned compiler version was bumped to `19.51.36248` to match the
+  current Build Tools release, and `setup-build-environment-example.cmd`
+  now accepts the installer's reboot-requested exit code (3010) as success.
+
 ## [v2.3.1] – 2026-06-05
 
 **No user-visible feature changes. This release adds reproducible builds** — 
@@ -772,6 +801,7 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+[Unreleased]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.3.1...opendocument-full-mode
 [v2.3.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.3.0...v2.3.1
 [v2.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.2...v2.3.0
 [v2.2.2]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.1...v2.2.2

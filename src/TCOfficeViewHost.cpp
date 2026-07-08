@@ -2033,7 +2033,8 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
         text += L"\r\n";
         text += L"To enable full document previews, install Microsoft Office\r\n";
         text += L"(any edition that includes the relevant application — Word\r\n";
-        text += L"for DOC/DOCX, Excel for XLS/XLSX, PowerPoint for PPT/PPTX,\r\n";
+        text += L"for DOC/DOCX/ODT, Excel for XLS/XLSX/ODS, PowerPoint for\r\n";
+        text += L"PPT/PPTX/ODP, ";
         text += L"Outlook for MSG, Visio for VSD/VSDX, ...).\r\n";
     }
     else
@@ -2374,15 +2375,29 @@ static AppKind ClassifyByExtension(LPCWSTR path)
 {
     LPCWSTR dot = wcsrchr(path, L'.');
     if (!dot || !dot[1]) return AppKind::Other;
-    // Compare case-insensitively against the known extensions.
+    // Compare case-insensitively against the known extensions. An entry
+    // belongs here only if the app opens the format via OLE Automation
+    // (Documents/Workbooks/Presentations.Open) — that is what enables the
+    // full mode and the mode-switch button. OpenDocument templates
+    // (.ott/.ots/.otp) are absent because MS Office does not open them;
+    // .csv/.txt/.xml are absent because Office registers no preview
+    // handler for them and a third-party handler failure would otherwise
+    // auto-fallback into a full Office launch.
     struct Entry { const wchar_t* ext; AppKind app; };
     static const Entry kTable[] = {
         { L".doc",  AppKind::Word },       { L".docx", AppKind::Word },
         { L".docm", AppKind::Word },       { L".rtf",  AppKind::Word },
+        { L".odt",  AppKind::Word },       { L".dot",  AppKind::Word },
+        { L".dotx", AppKind::Word },       { L".dotm", AppKind::Word },
         { L".xls",  AppKind::Excel },      { L".xlsx", AppKind::Excel },
         { L".xlsm", AppKind::Excel },      { L".xlsb", AppKind::Excel },
+        { L".ods",  AppKind::Excel },      { L".xlt",  AppKind::Excel },
+        { L".xltx", AppKind::Excel },      { L".xltm", AppKind::Excel },
         { L".ppt",  AppKind::PowerPoint }, { L".pptx", AppKind::PowerPoint },
-        { L".pptm", AppKind::PowerPoint },
+        { L".pptm", AppKind::PowerPoint }, { L".odp",  AppKind::PowerPoint },
+        { L".pps",  AppKind::PowerPoint }, { L".ppsx", AppKind::PowerPoint },
+        { L".ppsm", AppKind::PowerPoint }, { L".pot",  AppKind::PowerPoint },
+        { L".potx", AppKind::PowerPoint }, { L".potm", AppKind::PowerPoint },
     };
     for (const auto& e : kTable)
         if (_wcsicmp(dot, e.ext) == 0) return e.app;
