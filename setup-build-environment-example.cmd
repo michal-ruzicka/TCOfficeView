@@ -48,15 +48,14 @@ if errorlevel 1 (echo ERROR: Build Tools installer download failed & exit /b 1)
 "%TEMP%\vs_buildtools.exe" --config "%SRC_DIR%\.vsconfig" ^
     --installPath C:\BuildTools ^
     --quiet --wait --norestart --nocache
-if errorlevel 1 (echo ERROR: Build Tools installation failed & exit /b 1)
+REM The VS bootstrapper returns 3010 when a reboot is requested; that is still
+REM a successful install, so accept it alongside 0.
+if errorlevel 1 if not errorlevel 3010 (echo ERROR: Build Tools installation failed & exit /b 1)
+if %errorlevel% gtr 3010 (echo ERROR: Build Tools installation failed & exit /b 1)
 
-echo.
-echo === Install CMake ===
-winget install --id Kitware.CMake --exact --silent --accept-package-agreements --accept-source-agreements
-if errorlevel 1 (echo ERROR: CMake installation failed & exit /b 1)
-REM winget registers cmake in the user PATH in the registry but does not update
-REM the current cmd session; add the default install location explicitly.
-set PATH=%PATH%;C:\Program Files\CMake\bin
+REM CMake (and Ninja) ship with the Build Tools via the VC.CMake.Project
+REM component in .vsconfig; build.cmd puts them on PATH through VsDevCmd.bat,
+REM so no separate CMake install is needed.
 
 echo.
 echo === Build ===

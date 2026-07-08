@@ -38,7 +38,7 @@ REM   EXPECTED_CL  — exact cl.exe version reported by "cl.exe /Bv"
 REM   CMAKE_T      — -vcvars_ver= token passed to VsDevCmd.bat (toolset major.minor)
 REM   CMAKE_SDK    — -DCMAKE_SYSTEM_VERSION= value (Windows SDK)
 REM ---------------------------------------------------------------------------
-set EXPECTED_CL=19.51.36246
+set EXPECTED_CL=19.51.36248
 set CMAKE_T=14.51
 set CMAKE_SDK=10.0.26100.0
 
