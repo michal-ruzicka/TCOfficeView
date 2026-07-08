@@ -3390,6 +3390,17 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
         VARIANT vAlerts; VariantInit(&vAlerts);
         vAlerts.vt = VT_I4; vAlerts.lVal = 0;
         DispCall(pApp, L"DisplayAlerts", DISPATCH_PROPERTYPUT, &vAlerts, 1, nullptr);
+        // Never execute macros in a preview. When Office is driven via COM
+        // the default is msoAutomationSecurityLow — Documents.Open would run
+        // AutoOpen/Document_Open VBA without any prompt (Protected View and
+        // the "Enable Content" bar do not apply to automation opens). Forcing
+        // msoAutomationSecurityForceDisable (= 3) covers every macro-capable
+        // format, including legacy .doc/.dot where macros are invisible in
+        // the extension. Runtime-only, per-instance; unlike other Application
+        // properties it is not persisted into the user's Office profile.
+        HRESULT hrSec = DispPutI4(pApp, L"AutomationSecurity", 3);
+        HostLog(L"  Word.AutomationSecurity=ForceDisable -> 0x%08lX",
+                static_cast<long>(hrSec));
         // Keep Word logically invisible until we install the overlay.
         DispPutBool(pApp, L"Visible", false);
 
@@ -3604,6 +3615,11 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
 
         // Excel.DisplayAlerts is a Boolean.
         DispPutBool(pApp, L"DisplayAlerts", false);
+        // Never execute macros in a preview — see the Word site for the
+        // full rationale (automation default is msoAutomationSecurityLow).
+        HRESULT hrSec = DispPutI4(pApp, L"AutomationSecurity", 3);
+        HostLog(L"  Excel.AutomationSecurity=ForceDisable -> 0x%08lX",
+                static_cast<long>(hrSec));
         DispPutBool(pApp, L"Visible", false);
         g_state.pExcelApp = pApp;
     }
@@ -3822,6 +3838,13 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
         VARIANT vAlerts; VariantInit(&vAlerts);
         vAlerts.vt = VT_I4; vAlerts.lVal = 1;
         DispCall(pApp, L"DisplayAlerts", DISPATCH_PROPERTYPUT, &vAlerts, 1, nullptr);
+        // Never execute macros in a preview — see the Word site for the
+        // full rationale. If PowerPoint was already running we attach to
+        // the user's instance; AutomationSecurity only governs programmatic
+        // opens, so the user's own UI-opened files are unaffected.
+        HRESULT hrSec = DispPutI4(pApp, L"AutomationSecurity", 3);
+        HostLog(L"  PowerPoint.AutomationSecurity=ForceDisable -> 0x%08lX",
+                static_cast<long>(hrSec));
         // PowerPoint refuses Visible=False. The window is visible between
         // CoCreateInstance and ShowOfficeOverlaySta; the loading indicator
         // covers the pane.

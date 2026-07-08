@@ -16,13 +16,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was treated as a generic preview-handler file, so the **→ Full** button
   never appeared and the quick→full auto-fallback never fired. The
   recognised set now additionally includes:
-    - **Word** — ODT (OpenDocument Text), DOT, DOTX, DOTM (templates)
-    - **Excel** — ODS (OpenDocument Spreadsheet), XLT, XLTX, XLTM (templates)
-    - **PowerPoint** — ODP (OpenDocument Presentation), PPS, PPSX, PPSM
-      (slideshows), POT, POTX, POTM (templates)
+    - **Word** — ODT (OpenDocument Text), DOT, DOTX (templates)
+    - **Excel** — ODS (OpenDocument Spreadsheet), XLT, XLTX (templates)
+    - **PowerPoint** — ODP (OpenDocument Presentation), PPS, PPSX
+      (slideshows), POT, POTX (templates)
 
   OpenDocument templates (OTT, OTS, OTP) are not included because
   Microsoft Office does not open them.
+
+### Security
+
+- **Full mode no longer executes document macros.** Office applications
+  driven via OLE Automation default to `msoAutomationSecurityLow`, so a
+  full-mode preview of a document with VBA macros used to run its
+  AutoOpen/Document_Open code **without any prompt**: automation opens
+  bypass both Protected View and the "Enable Content" notification bar.
+  In practice this affected XLSB and the legacy DOC / XLS / PPT formats
+  (the explicitly macro-enabled DOCM / XLSM / PPTM never reach the plugin
+  at all — see the note below). The host now sets
+  `Application.AutomationSecurity = msoAutomationSecurityForceDisable` on
+  every Word / Excel / PowerPoint instance it creates, so previews never
+  execute macros in either mode (quick previews could never run them).
+  The setting is per-instance and runtime-only — it does not change the
+  user's Office configuration. To run a document's macros, open the file
+  in the Office application itself.
+
+  Note that Office deliberately registers no preview handler for any of
+  its macro-enabled formats (DOCM, DOTM, XLSM, XLTM, PPTM, PPSM, POTM) —
+  those files preview neither in Windows Explorer's Alt+P pane nor in
+  this plugin, which steps aside so Total Commander's next viewer takes
+  over. XLSB is the exception: it can carry macros yet has a preview
+  handler registered, which is one more reason the defence is the
+  automation setting rather than an extension list. This is now
+  documented in `README.md`.
 
 ### Fixed
 

@@ -468,7 +468,36 @@ persists Application properties (status bar, ribbon state, default
 zoom, recent files, …) into the user's profile on Quit, so changing
 them here would silently rewrite the user's standalone-Word
 preferences. Only window-, view- and document-scoped properties are in
-scope.
+scope. Permitted exceptions are Application properties that are
+**runtime-only and never persisted**: `ScreenUpdating` (Excel repaint
+insurance) and `AutomationSecurity` (see below).
+
+### Macros are never executed
+
+Office started via COM automation defaults to
+`msoAutomationSecurityLow`, meaning `Documents.Open` (and the Excel /
+PowerPoint equivalents) would run AutoOpen/Document_Open VBA without
+any prompt — automation opens bypass both Protected View and the
+"Enable Content" bar. Each `LoadXxxFullSta` therefore sets
+`Application.AutomationSecurity = msoAutomationSecurityForceDisable`
+(= 3) right after `CoCreateInstance`, before any `Open` call. This is
+the only macro defence that also covers the legacy formats (`.doc`,
+`.xls`, `.ppt`, `.dot`, `.xlt`, `.pot`), where macro capability is not
+visible in the extension. Quick mode needs no equivalent — preview
+handlers cannot execute VBA. Do not remove this or make it
+configurable; a preview must never run document code.
+
+Related: Office registers **no preview handler for any of its
+macro-enabled formats** (`.docm`, `.dotm`, `.xlsm`, `.xltm`, `.pptm`,
+`.ppsm`, `.potm`; verified in the registry — every non-macro sibling
+extension has one) — Explorer's Alt+P does not preview them either.
+The plugin DLL's registry probe (`HasPreviewHandlerForExt`) therefore
+declines them before the host is ever spawned (no host log entry), and
+TC falls through to its next viewer. This is expected behaviour, not a
+bug. `.xlsb` is the counterexample that justifies the automation
+setting over an extension deny-list: it can carry macros yet has a
+preview handler registered, and legacy `.doc`/`.xls`/`.ppt` can carry
+them invisibly too.
 
 ### Full-mode overlay
 

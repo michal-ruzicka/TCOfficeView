@@ -111,9 +111,9 @@ installation:
 
 | Source | Extensions |
 |--------|------------|
-| Microsoft Word        | DOC, DOCX, DOCM, RTF, ODT, DOT, DOTX, DOTM |
-| Microsoft Excel       | XLS, XLSX, XLSM, XLSB, ODS, XLT, XLTX, XLTM |
-| Microsoft PowerPoint  | PPT, PPTX, PPTM, ODP, PPS, PPSX, PPSM, POT, POTX, POTM |
+| Microsoft Word        | DOC, DOCX, RTF, ODT, DOT, DOTX |
+| Microsoft Excel       | XLS, XLSX, XLSB, ODS, XLT, XLTX |
+| Microsoft PowerPoint  | PPT, PPTX, ODP, PPS, PPSX, POT, POTX |
 | Microsoft Visio       | VSD, VSDX |
 | Outlook / Windows built-in mail previewer | MSG |
 | Microsoft Edge (built-in) / Adobe Acrobat Reader | PDF |
@@ -143,6 +143,21 @@ that up automatically the next time you use `F3` / `Ctrl+Q`.
 > sometimes omit the `.vsdx` handler. If Windows Explorer's own preview
 > pane is also empty for a given file, the plugin falls back to the
 > information panel.
+
+> **Macro-enabled Office formats (DOCM, XLSM, PPTM, …).** Office
+> deliberately does not register a preview handler for any of its
+> macro-enabled formats — DOCM, DOTM, XLSM, XLTM, PPTM, PPSM, POTM — so
+> these files show no preview in Windows Explorer's `Alt+P` pane either;
+> the plugin steps aside and Total Commander uses its next viewer. This
+> applies in **every** render mode: without a registered preview handler
+> the plugin never claims the file, so these formats cannot be previewed
+> at all — not even by setting Full mode as the default.
+> **Previews never run macros in any case.** This matters for the
+> formats that *do* preview but can still carry macros — XLSB and legacy
+> DOC / XLS / PPT: the quick preview components cannot execute macros,
+> and Full mode explicitly disables them before opening the file. To
+> actually run a document's macros, open the file in the Office
+> application itself.
 
 ### Configuration
 
@@ -214,6 +229,15 @@ application in the background, opens the file read-only, and floats
 its main window as a borderless overlay over the Lister pane. It is
 slower (~2–4 s cold start, ~100–300 MB per instance) but renders
 documents exactly as the full Office application would.
+
+**Neither engine ever runs macros.** Quick previews cannot execute
+them by design, and Full mode disables macro execution before opening
+the file — a macro-carrying XLSB or legacy DOC / XLS / PPT file
+previews as an ordinary document with its macros inert. (The
+explicitly macro-enabled formats — DOCM, XLSM, PPTM, … — never preview
+at all, in either mode; see [Supported Formats](#supported-formats).)
+External workbook links are not refreshed either. To run a document's
+macros, open the file in the Office application itself.
 
 All three applications can be configured independently:
 
