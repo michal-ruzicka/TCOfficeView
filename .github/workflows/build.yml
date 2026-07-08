@@ -32,7 +32,11 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # Install Visual Studio 2026 Build Tools (C++ workload) and CMake.
+      # Install Visual Studio 2026 Build Tools. The .vsconfig includes the
+      # VC.CMake.Project component, so CMake (and Ninja) ship with the Build
+      # Tools — build.cmd puts them on PATH via VsDevCmd.bat. No separate CMake
+      # install is needed; relying on the bundled CMake also keeps the local
+      # and CI toolchains identical for reproducible builds.
       - name: Setup the build environment
         shell: cmd
         run: |
@@ -40,7 +44,10 @@ jobs:
           %TEMP%\vs_buildtools.exe --config .\.vsconfig ^
             --installPath C:\BuildTools ^
             --quiet --wait --norestart --nocache
-          winget install --id Kitware.CMake --exact --silent --accept-package-agreements --accept-source-agreements
+          rem The VS bootstrapper returns 3010 when a reboot is requested; that
+          rem is still a successful install, so treat it as success.
+          if %errorlevel% equ 3010 exit /b 0
+          exit /b %errorlevel%
 
       # build.cmd locates Visual Studio Build Tools via vswhere, activates the
       # compiler environment for each target architecture via VsDevCmd.bat,
