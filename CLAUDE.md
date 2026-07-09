@@ -529,6 +529,17 @@ while any overlay is active) reconstructs what a child window got for free:
   reposition the overlay when it changes (cached in `g_state.lastOverlayRect`).
   TC window *moves* send no `RESIZE`, hence the poll. `ResizeOfficeFullSta`
   also calls the tracker directly for snappy resizes.
+- **Undo user moves / resizes.** The borderless frame is still draggable by
+  the in-app title bar and resizable by its edges (Office hit-tests
+  HTCAPTION / edge grips in the client area). When `GetGUIThreadInfo` on the
+  Office UI thread reports `GUI_INMOVESIZE` **with `hwndMoveSize` equal to
+  the overlay** (an in-app dialog drag on the same thread must be left
+  alone), the tracker sends `WM_CANCELMODE` via `SendNotifyMessage` — the
+  modal loop aborts like Esc and the grab never takes effect. Outside the
+  loop, any mismatch between the overlay's actual rect and the pane rect is
+  snapped back; if Office refuses the rect (minimum-size clamp), the failed
+  pane rect is remembered and retried only after the pane changes, to avoid
+  a 25 Hz SetWindowPos fight.
 - **Visibility / "hide when covered".** Show the overlay when the foreground
   window's root is TC's window (`GetAncestor(hwndPluginChild, GA_ROOT)`) **or**
   the foreground is on the Office app's own UI thread (`fgIsApp` — covers

@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The full-mode overlay window can no longer be moved or resized by the
+  user.** The borderless Office window floated over the Lister pane could be
+  dragged away by the free space of its title bar, or resized by grabbing
+  its edges (typically by accident, when aiming for the Lister's edge), and
+  stayed displaced until the pane itself changed. The overlay tracker now
+  cancels such a drag the moment it starts — the window never leaves its
+  place — and additionally snaps the window back over the pane whenever its
+  position or size drifts for any other reason.
 - **GitHub CI build restored.** The workflow now uses the CMake (and Ninja)
   bundled with the Visual Studio Build Tools via the `VC.CMake.Project`
   component instead of installing CMake separately through winget. This also
