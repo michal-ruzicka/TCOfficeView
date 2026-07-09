@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.4.0] – 2026-07-09
+
+### Added
+
+- **Full mode (and the mode-switch button) now covers OpenDocument files,
+  Office templates and PowerPoint slideshows.** Previously only the classic
+  Office extensions were recognised as Word / Excel / PowerPoint documents;
+  everything else — including formats those applications open natively —
+  was treated as a generic preview-handler file, so the **→ Full** button
+  never appeared and the quick→full auto-fallback never fired. The
+  recognised set now additionally includes:
+    - **Word** — ODT (OpenDocument Text), DOT, DOTX (templates)
+    - **Excel** — ODS (OpenDocument Spreadsheet), XLT, XLTX (templates)
+    - **PowerPoint** — ODP (OpenDocument Presentation), PPS, PPSX
+      (slideshows), POT, POTX (templates)
+
+  OpenDocument templates (OTT, OTS, OTP) are not included because
+  Microsoft Office does not open them.
+
+### Security
+
+- **Full mode no longer executes document macros.** Office applications
+  driven via OLE Automation default to `msoAutomationSecurityLow`, so a
+  full-mode preview of a document with VBA macros used to run its
+  AutoOpen/Document_Open code **without any prompt**: automation opens
+  bypass both Protected View and the "Enable Content" notification bar.
+  In practice this affected XLSB and the legacy DOC / XLS / PPT formats
+  (the explicitly macro-enabled DOCM / XLSM / PPTM never reach the plugin
+  at all — see the note below). The host now sets
+  `Application.AutomationSecurity = msoAutomationSecurityForceDisable` on
+  every Word / Excel / PowerPoint instance it creates, so previews never
+  execute macros in either mode (quick previews could never run them).
+  The setting is per-instance and runtime-only — it does not change the
+  user's Office configuration. To run a document's macros, open the file
+  in the Office application itself.
+
+  Note that Office deliberately registers no preview handler for any of
+  its macro-enabled formats (DOCM, DOTM, XLSM, XLTM, PPTM, PPSM, POTM) —
+  those files preview neither in Windows Explorer's Alt+P pane nor in
+  this plugin, which steps aside so Total Commander's next viewer takes
+  over. XLSB is the exception: it can carry macros yet has a preview
+  handler registered, which is one more reason the defence is the
+  automation setting rather than an extension list. This is now
+  documented in `README.md`.
+
+### Fixed
+
+- **The full-mode overlay window can no longer be moved or resized by the
+  user.** The borderless Office window floated over the Lister pane could be
+  dragged away by the free space of its title bar, or resized by grabbing
+  its edges (typically by accident, when aiming for the Lister's edge), and
+  stayed displaced until the pane itself changed. The overlay tracker now
+  cancels such a drag the moment it starts — the window never leaves its
+  place — and additionally snaps the window back over the pane whenever its
+  position or size drifts for any other reason.
+- **GitHub CI build restored.** The workflow now uses the CMake (and Ninja)
+  bundled with the Visual Studio Build Tools via the `VC.CMake.Project`
+  component instead of installing CMake separately through winget. This also
+  keeps the local and CI toolchains identical for reproducible builds.
+  The pinned compiler version was bumped to `19.51.36248` to match the
+  current Build Tools release, and `setup-build-environment-example.cmd`
+  now accepts the installer's reboot-requested exit code (3010) as success.
+
 ## [v2.3.1] – 2026-06-05
 
 **No user-visible feature changes. This release adds reproducible builds** — 
@@ -772,6 +835,8 @@ First working release.
 - Static C/C++ runtime linkage so the artifacts have no `vcruntime*.dll`
   dependency.
 
+
+[v2.4.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.3.1...v2.4.0
 [v2.3.1]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.3.0...v2.3.1
 [v2.3.0]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.2...v2.3.0
 [v2.2.2]: https://github.com/michal-ruzicka/TCOfficeView/compare/v2.2.1...v2.2.2

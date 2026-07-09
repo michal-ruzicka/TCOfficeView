@@ -2033,7 +2033,8 @@ static std::wstring BuildFallbackText(LPCWSTR path, HRESULT hr)
         text += L"\r\n";
         text += L"To enable full document previews, install Microsoft Office\r\n";
         text += L"(any edition that includes the relevant application — Word\r\n";
-        text += L"for DOC/DOCX, Excel for XLS/XLSX, PowerPoint for PPT/PPTX,\r\n";
+        text += L"for DOC/DOCX/ODT, Excel for XLS/XLSX/ODS, PowerPoint for\r\n";
+        text += L"PPT/PPTX/ODP, ";
         text += L"Outlook for MSG, Visio for VSD/VSDX, ...).\r\n";
     }
     else
@@ -2374,15 +2375,29 @@ static AppKind ClassifyByExtension(LPCWSTR path)
 {
     LPCWSTR dot = wcsrchr(path, L'.');
     if (!dot || !dot[1]) return AppKind::Other;
-    // Compare case-insensitively against the known extensions.
+    // Compare case-insensitively against the known extensions. An entry
+    // belongs here only if the app opens the format via OLE Automation
+    // (Documents/Workbooks/Presentations.Open) — that is what enables the
+    // full mode and the mode-switch button. OpenDocument templates
+    // (.ott/.ots/.otp) are absent because MS Office does not open them;
+    // .csv/.txt/.xml are absent because Office registers no preview
+    // handler for them and a third-party handler failure would otherwise
+    // auto-fallback into a full Office launch.
     struct Entry { const wchar_t* ext; AppKind app; };
     static const Entry kTable[] = {
         { L".doc",  AppKind::Word },       { L".docx", AppKind::Word },
         { L".docm", AppKind::Word },       { L".rtf",  AppKind::Word },
+        { L".odt",  AppKind::Word },       { L".dot",  AppKind::Word },
+        { L".dotx", AppKind::Word },       { L".dotm", AppKind::Word },
         { L".xls",  AppKind::Excel },      { L".xlsx", AppKind::Excel },
         { L".xlsm", AppKind::Excel },      { L".xlsb", AppKind::Excel },
+        { L".ods",  AppKind::Excel },      { L".xlt",  AppKind::Excel },
+        { L".xltx", AppKind::Excel },      { L".xltm", AppKind::Excel },
         { L".ppt",  AppKind::PowerPoint }, { L".pptx", AppKind::PowerPoint },
-        { L".pptm", AppKind::PowerPoint },
+        { L".pptm", AppKind::PowerPoint }, { L".odp",  AppKind::PowerPoint },
+        { L".pps",  AppKind::PowerPoint }, { L".ppsx", AppKind::PowerPoint },
+        { L".ppsm", AppKind::PowerPoint }, { L".pot",  AppKind::PowerPoint },
+        { L".potx", AppKind::PowerPoint }, { L".potm", AppKind::PowerPoint },
     };
     for (const auto& e : kTable)
         if (_wcsicmp(dot, e.ext) == 0) return e.app;
@@ -3207,6 +3222,78 @@ static void TrackOfficeOverlaySta()
         }
     }
 
+    // --- Undo user moves / resizes of the overlay ---------------------------
+    // Even borderless, the Office window can be dragged by the free space of
+    // its in-app title bar or resized by its edges — modern Office hit-tests
+    // HTCAPTION / HTBOTTOMRIGHT etc. in the client area, so stripping
+    // WS_CAPTION|WS_THICKFRAME does not remove those grips. The overlay's
+    // geometry is owned by this tracker, so a user grab is always an accident:
+    //   1. If the Office UI thread is inside the modal move/size loop FOR THE
+    //      OVERLAY WINDOW (gti.hwndMoveSize — an in-app dialog being dragged
+    //      on the same thread must be left alone), abort the loop with
+    //      WM_CANCELMODE. That ends the drag like pressing Esc: the window
+    //      snaps back to its pre-drag geometry and the grab never takes
+    //      effect. SendNotifyMessage keeps the STA from blocking on the
+    //      Office thread; the move loop is pumping, so it processes promptly.
+    //   2. Outside the loop, snap the window back whenever its actual rect
+    //      differs from the pane rect (covers a drag completed between ticks
+    //      and any programmatic self-move by Office). If Office refuses the
+    //      rect (e.g. clamps to a minimum size larger than the pane), don't
+    //      fight it at 25 Hz — remember the pane rect that failed and retry
+    //      only after the pane changes.
+    {
+        GUITHREADINFO gti = {};
+        gti.cbSize = sizeof(gti);
+        const bool inMoveSize =
+            GetGUIThreadInfo(overlayThread, &gti) &&
+            (gti.flags & GUI_INMOVESIZE) && gti.hwndMoveSize == hOverlay;
+        if (inMoveSize)
+        {
+            SendNotifyMessageW(hOverlay, WM_CANCELMODE, 0, 0);
+            HostLog(L"  TrackOfficeOverlay: user move/size loop cancelled");
+        }
+        else
+        {
+            static RECT s_stuckPane = {};    // pane rect Office refused to take
+            static HWND s_stuckFor  = nullptr;
+            if (hOverlay != s_stuckFor)      // new overlay window → fresh start
+            {
+                SetRectEmpty(&s_stuckPane);
+                s_stuckFor = hOverlay;
+            }
+            RECT actual = {};
+            if (GetWindowRect(hOverlay, &actual) &&
+                !EqualRect(&actual, &paneRect) &&
+                !EqualRect(&paneRect, &s_stuckPane))
+            {
+                SetWindowPos(hOverlay, HWND_TOPMOST,
+                             paneRect.left, paneRect.top,
+                             paneRect.right - paneRect.left,
+                             paneRect.bottom - paneRect.top,
+                             SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                RECT after = {};
+                GetWindowRect(hOverlay, &after);
+                if (EqualRect(&after, &paneRect))
+                {
+                    SetRectEmpty(&s_stuckPane);
+                    HostLog(L"  TrackOfficeOverlay: drift (%ld,%ld,%ld,%ld) "
+                            L"corrected back to pane",
+                            actual.left, actual.top, actual.right, actual.bottom);
+                }
+                else
+                {
+                    s_stuckPane = paneRect;
+                    HostLog(L"  TrackOfficeOverlay: overlay refuses pane rect "
+                            L"(%ld,%ld,%ld,%ld), got (%ld,%ld,%ld,%ld); "
+                            L"backing off until the pane changes",
+                            paneRect.left, paneRect.top,
+                            paneRect.right, paneRect.bottom,
+                            after.left, after.top, after.right, after.bottom);
+                }
+            }
+        }
+    }
+
     // --- Keep the clip region in sync with the pane and the button --------
     // Recompute only when something the region depends on changed.
     static HWND s_rgnFor    = nullptr;
@@ -3375,6 +3462,17 @@ static HRESULT LoadWordFullSta(LPCWSTR path)
         VARIANT vAlerts; VariantInit(&vAlerts);
         vAlerts.vt = VT_I4; vAlerts.lVal = 0;
         DispCall(pApp, L"DisplayAlerts", DISPATCH_PROPERTYPUT, &vAlerts, 1, nullptr);
+        // Never execute macros in a preview. When Office is driven via COM
+        // the default is msoAutomationSecurityLow — Documents.Open would run
+        // AutoOpen/Document_Open VBA without any prompt (Protected View and
+        // the "Enable Content" bar do not apply to automation opens). Forcing
+        // msoAutomationSecurityForceDisable (= 3) covers every macro-capable
+        // format, including legacy .doc/.dot where macros are invisible in
+        // the extension. Runtime-only, per-instance; unlike other Application
+        // properties it is not persisted into the user's Office profile.
+        HRESULT hrSec = DispPutI4(pApp, L"AutomationSecurity", 3);
+        HostLog(L"  Word.AutomationSecurity=ForceDisable -> 0x%08lX",
+                static_cast<long>(hrSec));
         // Keep Word logically invisible until we install the overlay.
         DispPutBool(pApp, L"Visible", false);
 
@@ -3589,6 +3687,11 @@ static HRESULT LoadExcelFullSta(LPCWSTR path)
 
         // Excel.DisplayAlerts is a Boolean.
         DispPutBool(pApp, L"DisplayAlerts", false);
+        // Never execute macros in a preview — see the Word site for the
+        // full rationale (automation default is msoAutomationSecurityLow).
+        HRESULT hrSec = DispPutI4(pApp, L"AutomationSecurity", 3);
+        HostLog(L"  Excel.AutomationSecurity=ForceDisable -> 0x%08lX",
+                static_cast<long>(hrSec));
         DispPutBool(pApp, L"Visible", false);
         g_state.pExcelApp = pApp;
     }
@@ -3807,6 +3910,13 @@ static HRESULT LoadPowerPointFullSta(LPCWSTR path)
         VARIANT vAlerts; VariantInit(&vAlerts);
         vAlerts.vt = VT_I4; vAlerts.lVal = 1;
         DispCall(pApp, L"DisplayAlerts", DISPATCH_PROPERTYPUT, &vAlerts, 1, nullptr);
+        // Never execute macros in a preview — see the Word site for the
+        // full rationale. If PowerPoint was already running we attach to
+        // the user's instance; AutomationSecurity only governs programmatic
+        // opens, so the user's own UI-opened files are unaffected.
+        HRESULT hrSec = DispPutI4(pApp, L"AutomationSecurity", 3);
+        HostLog(L"  PowerPoint.AutomationSecurity=ForceDisable -> 0x%08lX",
+                static_cast<long>(hrSec));
         // PowerPoint refuses Visible=False. The window is visible between
         // CoCreateInstance and ShowOfficeOverlaySta; the loading indicator
         // covers the pane.

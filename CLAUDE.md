@@ -468,7 +468,36 @@ persists Application properties (status bar, ribbon state, default
 zoom, recent files, …) into the user's profile on Quit, so changing
 them here would silently rewrite the user's standalone-Word
 preferences. Only window-, view- and document-scoped properties are in
-scope.
+scope. Permitted exceptions are Application properties that are
+**runtime-only and never persisted**: `ScreenUpdating` (Excel repaint
+insurance) and `AutomationSecurity` (see below).
+
+### Macros are never executed
+
+Office started via COM automation defaults to
+`msoAutomationSecurityLow`, meaning `Documents.Open` (and the Excel /
+PowerPoint equivalents) would run AutoOpen/Document_Open VBA without
+any prompt — automation opens bypass both Protected View and the
+"Enable Content" bar. Each `LoadXxxFullSta` therefore sets
+`Application.AutomationSecurity = msoAutomationSecurityForceDisable`
+(= 3) right after `CoCreateInstance`, before any `Open` call. This is
+the only macro defence that also covers the legacy formats (`.doc`,
+`.xls`, `.ppt`, `.dot`, `.xlt`, `.pot`), where macro capability is not
+visible in the extension. Quick mode needs no equivalent — preview
+handlers cannot execute VBA. Do not remove this or make it
+configurable; a preview must never run document code.
+
+Related: Office registers **no preview handler for any of its
+macro-enabled formats** (`.docm`, `.dotm`, `.xlsm`, `.xltm`, `.pptm`,
+`.ppsm`, `.potm`; verified in the registry — every non-macro sibling
+extension has one) — Explorer's Alt+P does not preview them either.
+The plugin DLL's registry probe (`HasPreviewHandlerForExt`) therefore
+declines them before the host is ever spawned (no host log entry), and
+TC falls through to its next viewer. This is expected behaviour, not a
+bug. `.xlsb` is the counterexample that justifies the automation
+setting over an extension deny-list: it can carry macros yet has a
+preview handler registered, and legacy `.doc`/`.xls`/`.ppt` can carry
+them invisibly too.
 
 ### Full-mode overlay
 
@@ -500,6 +529,17 @@ while any overlay is active) reconstructs what a child window got for free:
   reposition the overlay when it changes (cached in `g_state.lastOverlayRect`).
   TC window *moves* send no `RESIZE`, hence the poll. `ResizeOfficeFullSta`
   also calls the tracker directly for snappy resizes.
+- **Undo user moves / resizes.** The borderless frame is still draggable by
+  the in-app title bar and resizable by its edges (Office hit-tests
+  HTCAPTION / edge grips in the client area). When `GetGUIThreadInfo` on the
+  Office UI thread reports `GUI_INMOVESIZE` **with `hwndMoveSize` equal to
+  the overlay** (an in-app dialog drag on the same thread must be left
+  alone), the tracker sends `WM_CANCELMODE` via `SendNotifyMessage` — the
+  modal loop aborts like Esc and the grab never takes effect. Outside the
+  loop, any mismatch between the overlay's actual rect and the pane rect is
+  snapped back; if Office refuses the rect (minimum-size clamp), the failed
+  pane rect is remembered and retried only after the pane changes, to avoid
+  a 25 Hz SetWindowPos fight.
 - **Visibility / "hide when covered".** Show the overlay when the foreground
   window's root is TC's window (`GetAncestor(hwndPluginChild, GA_ROOT)`) **or**
   the foreground is on the Office app's own UI thread (`fgIsApp` — covers
