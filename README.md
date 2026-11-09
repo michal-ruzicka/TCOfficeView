@@ -161,12 +161,17 @@ that up automatically the next time you use `F3` / `Ctrl+Q`.
 
 ### Configuration
 
-Settings live in `TCOfficeView.ini`. The plugin reads it from two
+Settings live in `TCOfficeView.ini`. The plugin looks for it in three
 locations and uses the **first one that exists** — values are not merged
 across files:
 
-1. `%APPDATA%\GHISLER\TCOfficeView.ini` — per-user override
-2. `<plugin install dir>\TCOfficeView.ini` — system-wide default
+1. the folder holding Total Commander's `wincmd.ini`, as Total Commander
+   tells the plugin
+2. `%APPDATA%\GHISLER\TCOfficeView.ini` — per-user override
+3. `<plugin install dir>\TCOfficeView.ini` — system-wide default
+
+In a standard installation the first two are the same file; a portable Total
+Commander keeps its `TCOfficeView.ini` next to its `wincmd.ini`.
 
 The plugin ships only `TCOfficeView.sample.ini`, which is never read and has
 every option commented out; without an INI all defaults apply. To customise,

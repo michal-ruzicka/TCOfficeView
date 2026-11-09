@@ -87,8 +87,10 @@
 // Runtime configuration (loaded from TCOfficeView.ini)
 //
 // Lookup order (first existing file wins; no per-key merging):
-//   1. %APPDATA%\GHISLER\TCOfficeView.ini       — per-user override
-//   2. <plugin install dir>\TCOfficeView.ini    — system-wide default
+//   1. TCOfficeView.ini in TC's settings folder (--settings-dir, the folder
+//      of wincmd.ini) — differs from 2 in a portable or redirected TC
+//   2. %APPDATA%\GHISLER\TCOfficeView.ini       — per-user override
+//   3. <plugin install dir>\TCOfficeView.ini    — system-wide default
 //
 // All values support environment-variable expansion (e.g. %TEMP%,
 // %LocalAppData%). See the shipped sample INI for the full key reference.
@@ -416,9 +418,13 @@ static bool LoadConfigFrom(const std::wstring& iniPath)
     return true;
 }
 
-static void LoadConfig()
+static void LoadConfig(const std::wstring& tcSettingsDir)
 {
-    // 1) Per-user override under TC's standard config directory.
+    // 1) Total Commander's own settings folder, as passed by the plugin.
+    if (!tcSettingsDir.empty() &&
+        LoadConfigFrom(tcSettingsDir + L"\\TCOfficeView.ini")) return;
+
+    // 2) Per-user override under TC's standard config directory.
     //    APPDATA itself is always short (~30 chars), but using a fixed
     //    MAX_PATH buffer is the kind of inconsistency that drifts into
     //    real bugs over time; a two-call dynamic read is just as cheap.
@@ -434,12 +440,12 @@ static void LoadConfig()
             if (LoadConfigFrom(userIni)) return;
         }
     }
-    // 2) System-wide INI next to the host EXE.
+    // 3) System-wide INI next to the host EXE.
     if (LoadConfigFrom(GetHostExeDir() + L"\\TCOfficeView.ini")) return;
 
-    // No INI found at either location — log defaults so the diagnostic log
+    // No INI found at any location — log defaults so the diagnostic log
     // always contains a complete picture of the effective configuration.
-    HostLog(L"Config: no INI found at either location; all defaults in effect");
+    HostLog(L"Config: no INI found at any location; all defaults in effect");
     HostLog(L"  [Mode]          Word=%-18s  Excel=%-18s  PowerPoint=%s",
             ModeStr(g_modeWord), ModeStr(g_modeExcel), ModeStr(g_modePowerPoint));
     HostLog(L"  [AutoFallback]  Word=%-5s  Excel=%-5s  PowerPoint=%s",
@@ -5434,8 +5440,13 @@ int wmain(int argc, wchar_t** argv)
     // initialised inside HostLog on the first call.
     InitializeCriticalSection(&g_logCs);
 
-    // Must run before the first HostLog() call so g_logPath is populated.
-    LoadConfig();
+    // Must run before the first HostLog() call so g_logPath is populated,
+    // hence ahead of ParseArgs, whose failure is logged.
+    std::wstring tcSettingsDir;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (wcscmp(argv[i], L"--settings-dir") == 0)
+            tcSettingsDir = argv[i + 1];
+    LoadConfig(tcSettingsDir);
 
     std::wstring pipeName;
     if (!ParseArgs(argc, argv, &g_state.hwndPluginChild, &pipeName))

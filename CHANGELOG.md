@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Portable and redirected Total Commander installs.** `TCOfficeView.ini` is now
+  looked for first in Total Commander's own settings folder, the one holding
+  `wincmd.ini`, which Total Commander tells the plugin. In a standard
+  installation that is `%APPDATA%\GHISLER` as before, so nothing changes there.
+
 ### Changed
 
 - **Updating the plugin no longer overwrites your settings.** The release ZIP

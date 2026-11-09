@@ -42,6 +42,15 @@
 #define LISTPLUGIN_OK    0
 #define LISTPLUGIN_ERROR 1
 
+// Passed to ListSetDefaultParams.  DefaultIniName is ANSI and lies in the
+// directory of Total Commander's wincmd.ini.
+typedef struct {
+    int   size;
+    DWORD PluginInterfaceVersionLow;
+    DWORD PluginInterfaceVersionHi;
+    char  DefaultIniName[MAX_PATH];
+} ListDefaultParamStruct;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,6 +62,7 @@ int   __stdcall ListLoadNextW(HWND ParentWin, HWND PluginWin, wchar_t* FileToLoa
 void  __stdcall ListCloseWindow(HWND ListWin);
 void  __stdcall ListGetDetectString(char* DetectString, int maxlen);
 int   __stdcall ListSendCommand(HWND ListWin, int Command, int Parameter);
+void  __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps);
 
 #ifdef __cplusplus
 }

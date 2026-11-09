@@ -150,9 +150,13 @@ TCResticBrowser scheme — see
 
 ## Configuration & fallback UI
 
-Runtime settings live in `TCOfficeView.ini`. The host looks for it under
-`%APPDATA%\GHISLER\TCOfficeView.ini` first (per-user override) and falls
-back to `<plugin install dir>\TCOfficeView.ini`. The first file that
+Runtime settings live in `TCOfficeView.ini`. The host looks for it in
+Total Commander's own settings folder first (the folder of `wincmd.ini`, from
+`DefaultIniName` of `ListSetDefaultParams`, passed to the host as
+`--settings-dir`; it differs from the next location only in a portable or
+redirected TC), then under `%APPDATA%\GHISLER\TCOfficeView.ini` (per-user
+override), and falls back to `<plugin install dir>\TCOfficeView.ini`. The
+plugin DLL resolves the same order for the deny list. The first file that
 exists wins entirely — no per-key merging. All values support
 environment-variable expansion (`%TEMP%`, `%LocalAppData%`, …). The ZIP
 ships only `TCOfficeView.sample.ini`: Total Commander's installer overwrites
