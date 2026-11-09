@@ -171,7 +171,7 @@ static std::set<std::wstring> g_deniedExtensions;
 
 // Locate the first existing INI file using the same lookup order the
 // host uses: per-user override under %APPDATA%\GHISLER first, then the
-// system-wide copy shipped alongside the plugin.  Returns an empty
+// system-wide file next to the plugin.  Returns an empty
 // string if neither exists.
 static std::wstring ResolveActiveIniPath()
 {

@@ -434,7 +434,7 @@ static void LoadConfig()
             if (LoadConfigFrom(userIni)) return;
         }
     }
-    // 2) System-wide INI shipped alongside the host EXE.
+    // 2) System-wide INI next to the host EXE.
     if (LoadConfigFrom(GetHostExeDir() + L"\\TCOfficeView.ini")) return;
 
     // No INI found at either location — log defaults so the diagnostic log

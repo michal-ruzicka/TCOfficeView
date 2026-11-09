@@ -21,7 +21,8 @@ REM     TCOfficeViewHost.exe            (64-bit host EXE)
 REM     TCOfficeViewHost_x86.exe        (32-bit host EXE)
 REM     sha256sums.sha256               (SHA-256 of the four binaries above)
 REM     pluginst.inf                    (TC auto-installer metadata)
-REM     TCOfficeView.ini                (system-wide sample config)
+REM     TCOfficeView.sample.ini         (sample config; never overwrites a
+REM                                      user's TCOfficeView.ini on update)
 REM     *.md                            (all repo-root Markdown docs)
 REM   dist\
 REM     TCOfficeView.v<version>.zip     (distributable bundle)
@@ -157,7 +158,7 @@ copy /Y "%BUILD%\x64\TCOfficeViewHost.exe"           "%STAGE%\TCOfficeViewHost.e
 copy /Y "%BUILD%\x86\TCOfficeView.wlx"               "%STAGE%\"                              >nul
 copy /Y "%BUILD%\x86\TCOfficeViewHost.exe"           "%STAGE%\TCOfficeViewHost_x86.exe"      >nul
 copy /Y "%SRC%\pluginst.inf"                         "%STAGE%\"                              >nul
-copy /Y "%SRC%\TCOfficeView.ini"                     "%STAGE%\"                              >nul
+copy /Y "%SRC%\TCOfficeView.sample.ini"              "%STAGE%\"                              >nul
 copy /Y "%ROOT%\*.md"                                "%STAGE%\"                              >nul
 
 echo.

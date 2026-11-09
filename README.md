@@ -166,12 +166,12 @@ locations and uses the **first one that exists** — values are not merged
 across files:
 
 1. `%APPDATA%\GHISLER\TCOfficeView.ini` — per-user override
-2. `<plugin install dir>\TCOfficeView.ini` — system-wide default, shipped
-   with the plugin
+2. `<plugin install dir>\TCOfficeView.ini` — system-wide default
 
-The shipped INI has every option commented out, so all defaults apply.
-To customise, copy that file to `%APPDATA%\GHISLER\TCOfficeView.ini` and
-edit the copy. Environment variables (`%TEMP%`, `%LocalAppData%`,
+The plugin ships only `TCOfficeView.sample.ini`, which is never read and has
+every option commented out; without an INI all defaults apply. To customise,
+copy the sample to `%APPDATA%\GHISLER\TCOfficeView.ini` and edit the copy.
+Updates of the plugin leave your `TCOfficeView.ini` alone. Environment variables (`%TEMP%`, `%LocalAppData%`,
 `%UserProfile%`, `%APPDATA%`, …) are expanded in any value.
 
 #### Logging

@@ -78,7 +78,7 @@ src/
   TCOfficeViewHost.cpp - host EXE (COM preview handler host + fallback UI)
   app.manifest        - host EXE manifest (PerMonitorV2 DPI)
   pluginst.inf        - TC auto-installer metadata; canonical version source
-  TCOfficeView.ini    - sample / system-wide config (logging, fallback font)
+  TCOfficeView.sample.ini - sample config (logging, fallback font), never read
 build/                - CMake out-of-source build trees (gitignored)
 dist/                 - released TCOfficeView.v<version>.zip files (gitignored)
 ```
@@ -154,7 +154,10 @@ Runtime settings live in `TCOfficeView.ini`. The host looks for it under
 `%APPDATA%\GHISLER\TCOfficeView.ini` first (per-user override) and falls
 back to `<plugin install dir>\TCOfficeView.ini`. The first file that
 exists wins entirely — no per-key merging. All values support
-environment-variable expansion (`%TEMP%`, `%LocalAppData%`, …).
+environment-variable expansion (`%TEMP%`, `%LocalAppData%`, …). The ZIP
+ships only `TCOfficeView.sample.ini`: Total Commander's installer overwrites
+what the ZIP carries, so a shipped `.ini` would replace the user's settings on
+every update (raised by the totalcmd.net package check).
 
 Sections currently honoured:
 
