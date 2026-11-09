@@ -181,7 +181,7 @@ apply. To change a setting:
    Options → Plugins → Lister plugins → Configure** shows where it is).
 2. Copy it as `TCOfficeView.ini` to the folder of Total Commander's `wincmd.ini`.
    In a standard installation that is `%APPDATA%\GHISLER`; in a portable one,
-   `cd %COMMANDER_INI%\..` in Total Commander's command line takes you there.
+   `cd %COMMANDER_INI%` in Total Commander's command line takes you there.
 3. Edit the copy.
 
 A copy in the plugin's folder is the system-wide default, and is ignored
@@ -544,8 +544,9 @@ detect string; it has to be changed in the configuration file.
 
 1. Close Total Commander completely (don't leave it running — TC may
    overwrite `wincmd.ini` on exit with its in-memory copy).
-2. Open `wincmd.ini` in a plain-text editor.  To find its location,
-   in TC open **Configuration → Options → About**.  Common locations
+2. Open `wincmd.ini` in a plain-text editor.  To find it, type
+   `cd %COMMANDER_INI%` in TC's command line before closing TC: the
+   panel jumps to the file.  Common locations
    are the TC install directory or `%APPDATA%\GHISLER\wincmd.ini`.
 3. Locate the `[ListerPlugins]` section.  You will see entries like:
    ```ini
