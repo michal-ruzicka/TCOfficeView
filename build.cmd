@@ -201,7 +201,7 @@ echo.
 echo === Package ===
 
 REM Pull the version out of pluginst.inf (single source of truth). The line
-REM looks like   version=0.1.0   — split on '=' and grab the second token.
+REM looks like   version=X.Y.Z[-devel]   — split on '=' and grab the second token.
 set VERSION=
 for /f "usebackq tokens=2 delims==" %%v in (`findstr /b /c:"version=" "%SRC%\pluginst.inf"`) do set VERSION=%%v
 if "%VERSION%"=="" (
