@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Michal Růžička <ruzicka.mich@gmail.com>
+
+// Version resource of the plugin DLL: shown in the file's properties and read
+// by Total Commander's Plugin Manager, so it can tell which version is
+// installed. The numbers come from version= in pluginst.inf (see CMakeLists.txt).
+
+// UTF-8 source: the strings below contain non-ASCII characters
+#pragma code_page(65001)
+
+#include <winresrc.h>
+#include "version.h"
+
+#ifdef _DEBUG
+#define VER_FILEFLAGS VS_FF_DEBUG
+#else
+#define VER_FILEFLAGS 0x0L
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     TCOV_VERSION_CSV
+PRODUCTVERSION  TCOV_VERSION_CSV
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       VER_FILEFLAGS
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Michal Růžička Hobby Development\0"
+            VALUE "FileDescription",  "TCOfficeView – Office preview for Total Commander (Lister plugin)\0"
+            VALUE "FileVersion",      TCOV_VERSION_STR "\0"
+            VALUE "InternalName",     TCOV_FILE_NAME "\0"
+            VALUE "LegalCopyright",   "Copyright 2026 Michal Růžička. Licensed under the Apache License 2.0.\0"
+            VALUE "OriginalFilename", TCOV_FILE_NAME "\0"
+            VALUE "ProductName",      "TCOfficeView\0"
+            VALUE "ProductVersion",   TCOV_PRODUCT_VER "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

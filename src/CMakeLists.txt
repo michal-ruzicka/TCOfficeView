@@ -36,23 +36,47 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 # ---------------------------------------------------------------------------
+# Version: version= in pluginst.inf is the single source of truth. It is
+# turned into version.h (for the VERSIONINFO resource) at configure time, and
+# CMake re-runs whenever pluginst.inf changes.
+# ---------------------------------------------------------------------------
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS pluginst.inf)
+file(STRINGS pluginst.inf _version_line REGEX "^version=")
+# A pre-release suffix (X.Y.Z-devel between releases) is kept in the product
+# version string; the numeric FILEVERSION carries MAJOR.MINOR.PATCH.0 only.
+if(NOT _version_line MATCHES "^version=(([0-9]+)\\.([0-9]+)\\.([0-9]+)(-[0-9A-Za-z.]+)?)[\r]*$")
+    message(FATAL_ERROR "pluginst.inf: no version=MAJOR.MINOR.PATCH[-suffix] line")
+endif()
+set(TCOV_VERSION "${CMAKE_MATCH_1}")
+set(TCOV_VER_MAJOR ${CMAKE_MATCH_2})
+set(TCOV_VER_MINOR ${CMAKE_MATCH_3})
+set(TCOV_VER_PATCH ${CMAKE_MATCH_4})
+
+# ---------------------------------------------------------------------------
 # Plugin DLL: TCOfficeView.wlx (32-bit) or TCOfficeView.wlx64 (64-bit)
 # ---------------------------------------------------------------------------
 
 add_library(TCOfficeView SHARED
     TCOfficeView.cpp
     TCOfficeView.def
+    TCOfficeView.rc   # VERSIONINFO
 )
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set_target_properties(TCOfficeView PROPERTIES
-        SUFFIX ".wlx64"
-        PREFIX "")
+    set(TCOV_SUFFIX ".wlx64")
+    set(TCOV_HOST_FILE_NAME "TCOfficeViewHost.exe")
 else()
-    set_target_properties(TCOfficeView PROPERTIES
-        SUFFIX ".wlx"
-        PREFIX "")
+    set(TCOV_SUFFIX ".wlx")
+    set(TCOV_HOST_FILE_NAME "TCOfficeViewHost_x86.exe")
 endif()
+set_target_properties(TCOfficeView PROPERTIES
+    SUFFIX "${TCOV_SUFFIX}"
+    PREFIX "")
+
+set(TCOV_FILE_NAME "TCOfficeView${TCOV_SUFFIX}")
+configure_file(version.h.in version.h @ONLY)
+target_include_directories(TCOfficeView PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 # ---------------------------------------------------------------------------
 # Host process: TCOfficeViewHost.exe (one per bitness, must match installed Office)
@@ -60,8 +84,10 @@ endif()
 
 add_executable(TCOfficeViewHost
     TCOfficeViewHost.cpp
+    TCOfficeViewHost.rc   # VERSIONINFO
     app.manifest
 )
+target_include_directories(TCOfficeViewHost PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 # Build as a Windows GUI subsystem app — no console window flashes when the
 # plugin spawns it. wmain is wired up via the entry point property.

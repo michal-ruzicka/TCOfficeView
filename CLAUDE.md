@@ -74,6 +74,9 @@ src/
   CMakeLists.txt      - builds TCOfficeView.wlx / .wlx64 and TCOfficeViewHost.exe
   TCOfficeView.cpp    - plugin DLL (TC Lister plugin entry points)
   TCOfficeView.def    - DLL exports
+  TCOfficeView.rc     - VERSIONINFO of the plugin DLL (Plugin Manager reads it)
+  TCOfficeViewHost.rc - VERSIONINFO of the host EXE
+  version.h.in        - template of the generated version.h (from pluginst.inf)
   listplug.h          - Lister plugin API (subset used here)
   TCOfficeViewHost.cpp - host EXE (COM preview handler host + fallback UI)
   app.manifest        - host EXE manifest (PerMonitorV2 DPI)
