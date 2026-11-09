@@ -137,9 +137,16 @@ short timer to avoid stalling TC's UI on the pipe write.
 
 ## Build prerequisites
 
-- Visual Studio 2026 Build Tools, workload: *Desktop development with C++*.
-- CMake 3.20+.
+- Visual Studio 2026 Build Tools with the components in `.vsconfig` (pinned
+  release: `EXPECTED_VS` in `build.cmd`).
+- CMake comes with them (`VC.CMake.Project`).
 - No .NET SDK. No other toolchain.
+
+Reproducible-build pins (EXPECTED_VS / EXPECTED_CL / CMAKE_T / CMAKE_SDK in
+`build.cmd`, the Build Tools bootstrapper URL + SHA-256 in the CI workflow and
+`setup-build-environment-example.cmd`, components in `.vsconfig`) follow the
+TCResticBrowser scheme — see
+[CONTRIBUTING.md](CONTRIBUTING.md#reproducible-builds) before touching them.
 
 ## Configuration & fallback UI
 

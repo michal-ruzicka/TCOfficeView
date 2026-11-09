@@ -25,6 +25,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Visual Studio Build Tools, pinned to one release so that CI builds with the
+# same toolset libraries and Windows SDK as a local build of that version
+# (build.cmd EXPECTED_VS). The fixed-version bootstrapper comes from
+# https://learn.microsoft.com/visualstudio/releases/2026/release-history; its
+# SHA-256 is part of the URL and checked again below. Bump the three together
+# with EXPECTED_VS, in a commit of their own.
+env:
+  VS_BUILDTOOLS_VERSION: 18.11.2
+  VS_BUILDTOOLS_URL: https://download.visualstudio.microsoft.com/download/pr/9a3f23c2-cc94-49a0-88c0-f9f19f2ac9df/c217be69e6547c77c62d870394cd649a7a85ab86fcaa526a6ff629d1ec043e77/vs_BuildTools.exe
+  VS_BUILDTOOLS_SHA256: c217be69e6547c77c62d870394cd649a7a85ab86fcaa526a6ff629d1ec043e77
+  # build.cmd uses this installation even if the runner image has a newer
+  # Visual Studio that vswhere would prefer.
+  TCOV_VSINSTALL: C:\BuildTools
+
 jobs:
   build:
     runs-on: windows-latest
@@ -32,22 +46,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Install Visual Studio 2026 Build Tools. The .vsconfig includes the
-      # VC.CMake.Project component, so CMake (and Ninja) ship with the Build
-      # Tools — build.cmd puts them on PATH via VsDevCmd.bat. No separate CMake
-      # install is needed; relying on the bundled CMake also keeps the local
-      # and CI toolchains identical for reproducible builds.
+      # Install Visual Studio 2026 Build Tools of the pinned release. The
+      # .vsconfig includes the VC.CMake.Project component, so CMake (and
+      # Ninja) ship with the Build Tools — build.cmd puts them on PATH via
+      # VsDevCmd.bat. No separate CMake install is needed; relying on the
+      # bundled CMake also keeps the local and CI toolchains identical for
+      # reproducible builds.
       - name: Setup the build environment
-        shell: cmd
+        shell: pwsh
         run: |
-          curl.exe -L -o %TEMP%\vs_buildtools.exe https://aka.ms/vs/18/stable/vs_buildtools.exe
-          %TEMP%\vs_buildtools.exe --config .\.vsconfig ^
-            --installPath C:\BuildTools ^
-            --quiet --wait --norestart --nocache
-          rem The VS bootstrapper returns 3010 when a reboot is requested; that
-          rem is still a successful install, so treat it as success.
-          if %errorlevel% equ 3010 exit /b 0
-          exit /b %errorlevel%
+          $exe = Join-Path $env:RUNNER_TEMP 'vs_BuildTools.exe'
+          Invoke-WebRequest -Uri $env:VS_BUILDTOOLS_URL -OutFile $exe
+          $actual = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          if ($actual -ne $env:VS_BUILDTOOLS_SHA256) { throw "vs_BuildTools.exe hash mismatch: $actual" }
+          $version = (Get-Item $exe).VersionInfo.ProductVersion
+          if ($version -ne $env:VS_BUILDTOOLS_VERSION) { throw "vs_BuildTools.exe installs $version, not $env:VS_BUILDTOOLS_VERSION" }
+          $setup = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList @(
+            '--config', (Join-Path $PWD '.vsconfig'), '--installPath', $env:TCOV_VSINSTALL,
+            '--quiet', '--wait', '--norestart', '--nocache')
+          # 3010 means "reboot requested", which is still a successful install
+          if ($setup.ExitCode -ne 0 -and $setup.ExitCode -ne 3010) { throw "vs_BuildTools.exe exited with $($setup.ExitCode)" }
 
       # build.cmd locates Visual Studio Build Tools via vswhere, activates the
       # compiler environment for each target architecture via VsDevCmd.bat,
@@ -55,6 +73,18 @@ jobs:
       - name: Build (x86 + x64)
         shell: cmd
         run: build.cmd
+
+      # The fingerprints describe toolchain, libraries, options and hashes of
+      # each bitness; compare them with a local build's when the ZIP hashes
+      # differ (CONTRIBUTING.md, "When the hashes differ").
+      - name: Upload build fingerprints
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: TCOfficeView-fingerprints
+          path: build\fingerprint-*.txt
+          if-no-files-found: warn
+          retention-days: 90
 
       # Make the distributable ZIP downloadable from the Actions run page.
       # It is not published as a GitHub Release — that step is done locally

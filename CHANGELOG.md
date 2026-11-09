@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The build is pinned to one Visual Studio release.** CI and
+  `setup-build-environment-example.cmd` now install Build Tools 18.11.2 from
+  its fixed-version bootstrapper, checked by SHA-256, instead of whatever the
+  stable channel offers on the day, and `build.cmd` warns when another release
+  is used. Each build also writes `build\fingerprint-<arch>.txt`, which shows
+  where two builds of one commit differ. Same process as TCResticBrowser.
+
 ## [v2.4.0] – 2026-07-09
 
 ### Added
