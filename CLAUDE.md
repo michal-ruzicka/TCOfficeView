@@ -165,6 +165,8 @@ environment-variable expansion (`%TEMP%`, `%LocalAppData%`, …). The ZIP
 ships only `TCOfficeView.sample.ini`: Total Commander's installer overwrites
 what the ZIP carries, so a shipped `.ini` would replace the user's settings on
 every update (raised by the totalcmd.net package check).
+The plugin never creates the INI itself: it is optional, the defaults live in
+the code, and whoever wants one copies the sample where it suits them.
 
 Sections currently honoured:
 

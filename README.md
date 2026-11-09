@@ -173,10 +173,20 @@ across files:
 In a standard installation the first two are the same file; a portable Total
 Commander keeps its `TCOfficeView.ini` next to its `wincmd.ini`.
 
-The plugin ships only `TCOfficeView.sample.ini`, which is never read and has
-every option commented out; without an INI all defaults apply. To customise,
-copy the sample to `%APPDATA%\GHISLER\TCOfficeView.ini` and edit the copy.
-Updates of the plugin leave your `TCOfficeView.ini` alone. Environment variables (`%TEMP%`, `%LocalAppData%`,
+The plugin needs no INI: it ships only `TCOfficeView.sample.ini`, which is never
+read and has every option commented out, and without an INI all defaults
+apply. To change a setting:
+
+1. Take `TCOfficeView.sample.ini` from the plugin's folder (**Configuration →
+   Options → Plugins → Lister plugins → Configure** shows where it is).
+2. Copy it as `TCOfficeView.ini` to the folder of Total Commander's `wincmd.ini`.
+   In a standard installation that is `%APPDATA%\GHISLER`; in a portable one,
+   `cd %COMMANDER_INI%\..` in Total Commander's command line takes you there.
+3. Edit the copy.
+
+A copy in the plugin's folder is the system-wide default, and is ignored
+entirely while either of the other two exists. Updates of the plugin leave
+your `TCOfficeView.ini` alone, and the plugin never creates one. Environment variables (`%TEMP%`, `%LocalAppData%`,
 `%UserProfile%`, `%APPDATA%`, …) are expanded in any value.
 
 #### Logging
