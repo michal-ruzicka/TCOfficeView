@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   README). A `TCOfficeView.ini` left there by an earlier version keeps working.
 
 - **The build is pinned to one Visual Studio release.** CI and
-  `setup-build-environment-example.cmd` now install Build Tools 18.11.2 from
+  `setup-build-environment-example.cmd` now install Build Tools 18.12.0 from
   its fixed-version bootstrapper, checked by SHA-256, instead of whatever the
   stable channel offers on the day, and `build.cmd` warns when another release
   is used. Each build also writes `build\fingerprint-<arch>.txt`, which shows

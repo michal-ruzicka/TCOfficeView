@@ -12,7 +12,7 @@ reports and patches are welcome via the project's
 - [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/)
   with the components listed in [`.vsconfig`](.vsconfig): the MSVC toolset,
   the Windows SDK and CMake. For a build that matches the CI build byte for
-  byte, use the pinned release, 18.11.2 (see
+  byte, use the pinned release, 18.12.0 (see
   [Reproducible Builds](#reproducible-builds)). Installing with
   `vs_buildtools.exe --config .vsconfig` (as
   `setup-build-environment-example.cmd` and the CI workflow do) selects
@@ -100,8 +100,8 @@ compiler output":
 
 | Parameter | Pinned to | Files that must match |
 |---|---|---|
-| Visual Studio release | `18.11.2` | `build.cmd` (`EXPECTED_VS`), `.github\workflows\build.yml` (`VS_BUILDTOOLS_VERSION`, `_URL`, `_SHA256`), `setup-build-environment-example.cmd` (`VS_BUILDTOOLS_URL`, `_SHA256`) |
-| Exact `cl.exe` version | `19.51.36260` | `build.cmd` (`EXPECTED_CL`) |
+| Visual Studio release | `18.12.0` | `build.cmd` (`EXPECTED_VS`), `.github\workflows\build.yml` (`VS_BUILDTOOLS_VERSION`, `_URL`, `_SHA256`), `setup-build-environment-example.cmd` (`VS_BUILDTOOLS_URL`, `_SHA256`) |
+| Exact `cl.exe` version | `19.51.36263` | `build.cmd` (`EXPECTED_CL`) |
 | MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig` (also used by the CI workflow) |
 | Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig` (also used by the CI workflow) |
 

@@ -48,8 +48,8 @@ REM With several Visual Studio installations, set TCOV_VSINSTALL to the folder
 REM of the one to use (CI sets it to C:\BuildTools); otherwise vswhere picks
 REM the newest.
 REM ---------------------------------------------------------------------------
-set EXPECTED_VS=18.11.2
-set EXPECTED_CL=19.51.36260
+set EXPECTED_VS=18.12.0
+set EXPECTED_CL=19.51.36263
 set CMAKE_T=14.51
 set CMAKE_SDK=10.0.26100.0
 
