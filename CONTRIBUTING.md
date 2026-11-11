@@ -9,13 +9,14 @@ reports and patches are welcome via the project's
 
 ## Prerequisites
 
-- [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/) with
-  the *Desktop development with C++* workload. The full Visual Studio IDE works
-  too, but is not required.
-- [**CMake**](https://cmake.org/) 3.20 or newer. Use CMake bundled with Visual 
-  Studio or install separately from cmake.org, via `winget install Kitware.CMake`, 
-  or via `choco upgrade cmake`. The build uses the NMake Makefiles generator, 
-  which has no cmake version requirement beyond the minimum above.
+- [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/)
+  with the components listed in [`.vsconfig`](.vsconfig): the MSVC toolset,
+  the Windows SDK and CMake. For a build that matches the CI build byte for
+  byte, use the pinned release, 18.12.0 (see
+  [Reproducible Builds](#reproducible-builds)). Installing with
+  `vs_buildtools.exe --config .vsconfig` (as
+  `setup-build-environment-example.cmd` and the CI workflow do) selects
+  exactly those. The full Visual Studio IDE works too, but is not required.
 
 No .NET SDK, no extra runtime — the project is pure C++ / Win32 / COM,
 linked against the static MSVC runtime.
@@ -32,6 +33,7 @@ linked against the static MSVC runtime.
 | `.gitignore` | Excludes `build\` and `dist\` from version control |
 | `.vsconfig` | Visual Studio component selection; pins the MSVC toolset and Windows SDK versions for the CI workflow and `setup-build-environment-example.cmd` |
 | `build.cmd` | Top-level build driver — the only file outside `src\` that the build touches |
+| `build-fingerprint.ps1` | Describes one build for comparing two of them (see [When the hashes differ](#when-the-hashes-differ)); called by `build.cmd` |
 | `CHANGELOG.md` | Release notes in Keep a Changelog format; bundled in every release ZIP |
 | `CLAUDE.md` | Project notes for Claude Code; bundled in every release ZIP |
 | `CONTRIBUTING.md` | Developer documentation (this file); bundled in every release ZIP |
@@ -53,7 +55,8 @@ CMake (NMake Makefiles generator) for both bitnesses (x86 and x64) using the
 sources under `src\` and packages the artifacts into
 `dist\TCOfficeView.v<version>.zip` — the same auto-install bundle described
 in *Installation*. The version is read from `src\pluginst.inf` as the single
-source of truth; bump it there before tagging a release.
+source of truth; CMake generates the `version.h` behind the version
+resources of the DLL and the host EXE from it.
 
 To set up a build environment from scratch on a fresh Windows installation
 (VM, [Windows Sandbox](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/),
@@ -92,14 +95,33 @@ Four independent sources of non-determinism are eliminated:
 | Absolute source paths in debug info | Compiler flag `/pathmap:<src-dir>=./` strips the machine-local prefix |
 | File modification times in ZIP entries | Normalized to `release-date=` read from `src\pluginst.inf` |
 
-Three additional parameters are pinned so that "same source" also means "same
+Four additional parameters are pinned so that "same source" also means "same
 compiler output":
 
 | Parameter | Pinned to | Files that must match |
 |---|---|---|
-| Exact `cl.exe` version | `19.51.36246` | `build.cmd` (`EXPECTED_CL`) |
-| MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig`, CI workflow |
-| Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig`, CI workflow |
+| Visual Studio release | `18.12.0` | `build.cmd` (`EXPECTED_VS`), `.github\workflows\build.yml` (`VS_BUILDTOOLS_VERSION`, `_URL`, `_SHA256`), `setup-build-environment-example.cmd` (`VS_BUILDTOOLS_URL`, `_SHA256`) |
+| Exact `cl.exe` version | `19.51.36263` | `build.cmd` (`EXPECTED_CL`) |
+| MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig` (also used by the CI workflow) |
+| Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig` (also used by the CI workflow) |
+
+The Visual Studio release matters on its own: an update can service the
+toolset libraries (`libcmt.lib`, `libcpmt.lib`, `libvcruntime.lib`) and the
+Windows SDK (`libucrt.lib`, headers) without changing the `cl.exe` version or
+the folder names. The CI workflow therefore installs Build Tools with the
+fixed-version bootstrapper of the pinned release (its SHA-256 is checked),
+not the latest one. Locally, keep Visual Studio at that release, or install
+the pinned Build Tools next to it with the same bootstrapper and point
+`build.cmd` at them:
+
+```
+set TCOV_VSINSTALL=C:\BuildTools
+build.cmd
+```
+
+Without `TCOV_VSINSTALL`, `build.cmd` uses the newest Visual Studio that
+`vswhere` reports. It warns when its version (`VSCMD_VER`, shown in the
+Developer Command Prompt banner) is not `EXPECTED_VS`.
 
 `build.cmd` checks `cl.exe` against `EXPECTED_CL` and prints a warning if
 they differ — the build continues regardless. The check exists so that when
@@ -144,12 +166,56 @@ If all three match, the released ZIP is identical to what the source builds.
 extraction — to confirm that an individual file was not corrupted during
 download or extraction — but it is not an independent trust anchor.
 
+#### When the hashes differ
+
+After each bitness, `build.cmd` runs `build-fingerprint.ps1`, which writes
+`build\fingerprint-x64.txt` and `build\fingerprint-x86.txt` and prints them
+into the log; the CI workflow also uploads them as the
+`TCOfficeView-fingerprints` artifact. A fingerprint lists everything that
+decides the bytes of the plugin DLL and the host EXE, with machine-specific folders replaced by
+placeholders (`<VS>`, `<VCTools>`, `<WindowsSdkDir>`, `<src>`, `<build>`), so
+two builds of the same commit should have identical fingerprints apart from
+the lines marked *informational*. Compare a local one with the one from CI:
+
+```
+fc build\fingerprint-x64.txt %USERPROFILE%\Downloads\TCOfficeView-fingerprints\fingerprint-x64.txt
+```
+
+Read the differences from the top; the first section that differs is usually
+the cause:
+
+| Section | What a difference means |
+|---|---|
+| `[toolchain]` | Another Visual Studio, MSVC toolset or Windows SDK build. The same version number with another hash of `cl.exe`, `c1xx.dll`, `c2.dll` or `link.exe` means a serviced toolset. Install the same Visual Studio version on both sides; a Visual Studio update can update the Windows SDK too. |
+| `[libraries]` | The static C/C++ runtime (`libcmt.lib`, `libcpmt.lib` and `libvcruntime.lib` from the toolset, `libucrt.lib` from the Windows SDK) or an import library differs, and their code is linked in. `libucrt.lib` changes with the SDK revision (10.0.26100.*x*), which the SDK folder name `10.0.26100.0` does not show; the SDK is installed machine-wide, so another product (or a newer Visual Studio instance) can update it under a pinned Visual Studio. |
+| `[options]` | CMake generated other compiler, resource compiler or linker options: another CMake version, or a changed `CMakeLists.txt`. |
+| `[objects]` | The toolchain and options are the same but an object file is not: the headers differ (another SDK revision) or the sources do. |
+| `[binary]` | Only the linked result differs: the linker or a library. The section hashes narrow it down (`.text` code, `.rdata` constants and the import table, `.rsrc` the resources). The `rich:` lines (the Rich header) list, per tool build, how many linked-in objects it produced: a library built by another compiler shows up as another `build` number. |
+
 #### Upgrading the pinned toolchain
 
-When you adopt a new MSVC toolset or Windows SDK version, update **all three
+When you adopt a new MSVC toolset or Windows SDK version, update **both
 locations** listed below to keep them in sync. A mismatch causes either a
 build failure (CMake cannot find the requested toolset) or silent divergence
 between local and CI builds.
+
+##### Visual Studio release
+
+Take the new release's *Build Tools* fixed-version bootstrapper from the
+[Visual Studio 2026 release history](https://learn.microsoft.com/visualstudio/releases/2026/release-history).
+The long hexadecimal folder in its URL is the SHA-256 of the file; check it
+after downloading (`certutil -hashfile vs_BuildTools.exe SHA256`), and check
+that the file's *Product version* (Properties, Details) is the release.
+Update, in one commit:
+
+1. **`build.cmd`** — `set EXPECTED_VS=18.XX.Y`
+2. **`.github\workflows\build.yml`** — `VS_BUILDTOOLS_VERSION`,
+   `VS_BUILDTOOLS_URL`, `VS_BUILDTOOLS_SHA256`
+3. **`setup-build-environment-example.cmd`** — `VS_BUILDTOOLS_URL`,
+   `VS_BUILDTOOLS_SHA256`
+
+Then update your local Visual Studio to the same release. A new release can
+bring a new `cl.exe`, so check the toolset below as well.
 
 ##### MSVC toolset
 
@@ -163,7 +229,7 @@ The path in the output contains the toolset directory, e.g.:
 `...\VC\Tools\MSVC\`**`14.51`**`.36231\bin\...`
 
 Use the first two numbers (`14.XX`) as the toolset token and the full
-four-part version (e.g. `19.51.36244`) as the exact compiler version.
+three-part `cl.exe` version (e.g. `19.51.36244`) as the exact compiler version.
 Update:
 
 1. **`build.cmd`** — the three pinned variables at the top of the file:
@@ -184,9 +250,10 @@ The SDK version is a five-digit build number, visible in VS Installer under
 the installed *Windows 11 SDK* component (e.g. `10.0.`**`26100`**`.0`).
 Update:
 
-1. **`build.cmd`** — both `cmake` configure lines:
+1. **`build.cmd`** — the `CMAKE_SDK` variable at the top of the file, which
+   both `cmake` configure lines pass on:
    ```
-   -DCMAKE_SYSTEM_VERSION=10.0.NNNNN.0
+   set CMAKE_SDK=10.0.NNNNN.0
    ```
 2. **`.vsconfig`** — the SDK component entry (this also covers the
    CI workflow, which installs the toolchain from `.vsconfig`):
@@ -203,11 +270,13 @@ generator flag needs updating. What does change:
 
 1. **`.vsconfig`** — the toolset and SDK component IDs change with each major
    VS release; update those using the guidance above.
-2. **`.github/workflows/build.yml`** — update the VS installer URL if the
-   stable channel URL changes (currently `https://aka.ms/vs/18/stable/vs_buildtools.exe`).
+2. **The pinned release** — a new major version has its own release history
+   page; pin one of its releases as described in *Visual Studio release*
+   above. `build.cmd` finds the installation through `vswhere`, which does not
+   depend on the major version.
 
-Ensure CMake is new enough to support any `CMakeLists.txt` features in use
-(`winget install Kitware.CMake` or `choco upgrade cmake`).
+CMake comes with the Build Tools (`VC.CMake.Project` in `.vsconfig`), so a
+new Visual Studio version also brings a matching CMake.
 
 ##### After any toolchain change
 
@@ -430,8 +499,12 @@ having to trust GitHub's infrastructure. The signing key fingerprint is
 Releases are built and signed locally; no private key ever leaves the
 developer's machine.
 
-1. On a feature branch, bump `version=` in `src\pluginst.inf` and add a
-   `## [X.Y.Z] – YYYY-MM-DD` entry to `CHANGELOG.md`.
+1. On a feature branch, set `version=X.Y.Z` (dropping the `-devel` suffix)
+   and `release-date=` in `src\pluginst.inf`, and turn the `[Unreleased]`
+   section of `CHANGELOG.md` into `## [vX.Y.Z] – YYYY-MM-DD` (and update the
+   link references at its end), in a final
+   "Bump plugin version to vX.Y.Z" commit. Development after a release
+   continues as `X.Y.Z-devel` of the next version.
 2. Open a PR, get it reviewed, and merge into `main`.
 3. On `main`, tag and push:
    ```

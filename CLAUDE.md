@@ -74,11 +74,14 @@ src/
   CMakeLists.txt      - builds TCOfficeView.wlx / .wlx64 and TCOfficeViewHost.exe
   TCOfficeView.cpp    - plugin DLL (TC Lister plugin entry points)
   TCOfficeView.def    - DLL exports
+  TCOfficeView.rc     - VERSIONINFO of the plugin DLL (Plugin Manager reads it)
+  TCOfficeViewHost.rc - VERSIONINFO of the host EXE
+  version.h.in        - template of the generated version.h (from pluginst.inf)
   listplug.h          - Lister plugin API (subset used here)
   TCOfficeViewHost.cpp - host EXE (COM preview handler host + fallback UI)
   app.manifest        - host EXE manifest (PerMonitorV2 DPI)
   pluginst.inf        - TC auto-installer metadata; canonical version source
-  TCOfficeView.ini    - sample / system-wide config (logging, fallback font)
+  TCOfficeView.sample.ini - sample config (logging, fallback font), never read
 build/                - CMake out-of-source build trees (gitignored)
 dist/                 - released TCOfficeView.v<version>.zip files (gitignored)
 ```
@@ -137,17 +140,33 @@ short timer to avoid stalling TC's UI on the pipe write.
 
 ## Build prerequisites
 
-- Visual Studio 2026 Build Tools, workload: *Desktop development with C++*.
-- CMake 3.20+.
+- Visual Studio 2026 Build Tools with the components in `.vsconfig` (pinned
+  release: `EXPECTED_VS` in `build.cmd`).
+- CMake comes with them (`VC.CMake.Project`).
 - No .NET SDK. No other toolchain.
+
+Reproducible-build pins (EXPECTED_VS / EXPECTED_CL / CMAKE_T / CMAKE_SDK in
+`build.cmd`, the Build Tools bootstrapper URL + SHA-256 in the CI workflow and
+`setup-build-environment-example.cmd`, components in `.vsconfig`) follow the
+TCResticBrowser scheme — see
+[CONTRIBUTING.md](CONTRIBUTING.md#reproducible-builds) before touching them.
 
 ## Configuration & fallback UI
 
-Runtime settings live in `TCOfficeView.ini`. The host looks for it under
-`%APPDATA%\GHISLER\TCOfficeView.ini` first (per-user override) and falls
-back to `<plugin install dir>\TCOfficeView.ini`. The first file that
+Runtime settings live in `TCOfficeView.ini`. The host looks for it in
+Total Commander's own settings folder first (the folder of `wincmd.ini`, from
+`DefaultIniName` of `ListSetDefaultParams`, passed to the host as
+`--settings-dir`; it differs from the next location only in a portable or
+redirected TC), then under `%APPDATA%\GHISLER\TCOfficeView.ini` (per-user
+override), and falls back to `<plugin install dir>\TCOfficeView.ini`. The
+plugin DLL resolves the same order for the deny list. The first file that
 exists wins entirely — no per-key merging. All values support
-environment-variable expansion (`%TEMP%`, `%LocalAppData%`, …).
+environment-variable expansion (`%TEMP%`, `%LocalAppData%`, …). The ZIP
+ships only `TCOfficeView.sample.ini`: Total Commander's installer overwrites
+what the ZIP carries, so a shipped `.ini` would replace the user's settings on
+every update (raised by the totalcmd.net package check).
+The plugin never creates the INI itself: it is optional, the defaults live in
+the code, and whoever wants one copies the sample where it suits them.
 
 Sections currently honoured:
 

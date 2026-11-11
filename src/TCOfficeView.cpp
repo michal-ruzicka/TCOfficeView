@@ -169,12 +169,21 @@ static bool RegReadDefaultString(HKEY root, LPCWSTR subPath, std::wstring& out)
 
 static std::set<std::wstring> g_deniedExtensions;
 
+// Total Commander's own settings folder (where wincmd.ini lives), set by
+// ListSetDefaultParams right after TC loads the DLL.  Empty when unknown.
+static std::wstring g_tcSettingsDir;
+
 // Locate the first existing INI file using the same lookup order the
-// host uses: per-user override under %APPDATA%\GHISLER first, then the
-// system-wide copy shipped alongside the plugin.  Returns an empty
-// string if neither exists.
+// host uses: Total Commander's settings folder first, then the per-user
+// override under %APPDATA%\GHISLER, then the system-wide file next to
+// the plugin.  Returns an empty string if none exists.
 static std::wstring ResolveActiveIniPath()
 {
+    if (!g_tcSettingsDir.empty())
+    {
+        std::wstring p = g_tcSettingsDir + L"\\TCOfficeView.ini";
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    }
     DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
     if (needed > 0)
     {
@@ -512,6 +521,9 @@ static bool LaunchHost(PreviewSession* session, const std::wstring& file)
     cmdLineStream << L"\"" << exePath << L"\""
                   << L" --hwnd " << reinterpret_cast<uintptr_t>(session->hwndChild)
                   << L" --pipe \"" << session->pipeName << L"\"";
+    // Never ends in a backslash, which would escape the closing quote.
+    if (!g_tcSettingsDir.empty())
+        cmdLineStream << L" --settings-dir \"" << g_tcSettingsDir << L"\"";
     std::wstring cmdLine = cmdLineStream.str();
 
     STARTUPINFOW si = { sizeof(si) };
@@ -702,6 +714,25 @@ void __stdcall ListGetDetectString(char* DetectString, int maxlen)
     // string*.
     const char* s = "EXT=\"*\"";
     strncpy_s(DetectString, maxlen, s, _TRUNCATE);
+}
+
+void __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps)
+{
+    // DefaultIniName names a file shared by all Lister plugins; only its
+    // folder is of interest here.  A path that is not absolute (never seen
+    // from TC) is ignored rather than resolved against the current directory.
+    g_tcSettingsDir.clear();
+    if (!dps) return;
+    wchar_t buf[MAX_PATH] = {};
+    int n = MultiByteToWideChar(CP_ACP, 0, dps->DefaultIniName,
+                                static_cast<int>(strnlen(dps->DefaultIniName, MAX_PATH)),
+                                buf, MAX_PATH - 1);
+    const std::wstring path(buf, n > 0 ? n : 0);
+    const bool absolute = path.size() > 2 &&
+        (path[1] == L':' || (path[0] == L'\\' && path[1] == L'\\'));
+    const size_t slash = path.find_last_of(L'\\');
+    if (absolute && slash != std::wstring::npos)
+        g_tcSettingsDir = path.substr(0, slash);
 }
 
 int __stdcall ListSendCommand(HWND /*ListWin*/, int /*Command*/, int /*Parameter*/)
